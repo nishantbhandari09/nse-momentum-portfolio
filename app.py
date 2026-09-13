@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+import yfinance as yf
 
 try:
     from kiteconnect import KiteConnect
@@ -78,10 +79,10 @@ def fmt_pct(x):
     return "—" if x is None or pd.isna(x) else f"{x:.2f}%"
 
 
-def latest_available_date(prices, requested_date):
-    if prices.empty:
+def latest_available_date(df, requested_date):
+    if df.empty:
         return None
-    idx = prices.index[prices.index <= pd.Timestamp(requested_date)]
+    idx = df.index[df.index <= pd.Timestamp(requested_date)]
     return idx[-1] if len(idx) else None
 
 
@@ -156,6 +157,65 @@ def get_kite_session():
         return kite, None, f"Zerodha access token is invalid/expired: {exc}"
 
 
+# -------------------- YAHOO FINANCE DATA --------------------
+@st.cache_data(ttl=12 * 60 * 60, show_spinner=False)
+def fetch_yahoo_ohlcv(symbols, start_date, end_date):
+    tickers = [f"{s}.NS" for s in symbols]
+    data = yf.download(tickers, start=start_date, end=end_date, group_by="column", auto_adjust=True, threads=True)
+    
+    if data.empty:
+        raise RuntimeError("Yahoo Finance returned no data.")
+
+    def extract_field(field_name):
+        df = data[field_name].copy() if field_name in data else pd.DataFrame()
+        if isinstance(df, pd.Series):
+            df = df.to_frame()
+        df.columns = [c.replace(".NS", "") for c in df.columns]
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        return df.sort_index()
+
+    closes = extract_field("Close")
+    highs = extract_field("High")
+    lows = extract_field("Low")
+
+    return {"close": closes, "high": highs, "low": lows}, "Yahoo Finance OHLCV Engine", []
+
+
+# -------------------- ZERODHA LIVE LTP --------------------
+@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
+def get_nse_equity_instruments(api_key, access_token):
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    rows = kite.instruments("NSE")
+    df = pd.DataFrame(rows)
+    df["tradingsymbol"] = df["tradingsymbol"].astype(str).str.upper()
+    eq = df[(df["segment"] == "NSE") & (df["instrument_type"] == "EQ")].copy()
+    return eq[["instrument_token", "tradingsymbol", "name"]]
+
+
+def fetch_zerodha_live_ltp(symbols, api_key, access_token):
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    keys = [f"NSE:{s}" for s in symbols]
+    
+    # Kite LTP endpoint accepts max 500 instruments in chunks
+    chunk_size = 250
+    ltp_map = {}
+    errors = []
+    
+    for i in range(0, len(keys), chunk_size):
+        chunk = keys[i : i + chunk_size]
+        try:
+            res = kite.ltp(chunk)
+            for k, v in res.items():
+                sym = k.replace("NSE:", "")
+                ltp_map[sym] = v.get("last_price")
+        except Exception as exc:
+            errors.append(f"Zerodha LTP chunk error: {exc}")
+
+    return pd.Series(ltp_map), errors
+
+
 # -------------------- GENERIC CSV / GOOGLE FINANCE PARSER --------------------
 def _clean_columns(df):
     df = df.copy()
@@ -172,7 +232,6 @@ def _find_col(columns, names):
 
 
 def parse_price_dataframe(raw_df, nifty_symbols):
-    """Accept wide or long CSV formats and return date x symbol close-price matrix."""
     df = _clean_columns(raw_df)
     date_col = _find_col(df.columns, ["date", "datetime", "timestamp", "time"])
     symbol_col = _find_col(df.columns, ["symbol", "ticker", "tradingsymbol", "security"])
@@ -181,7 +240,6 @@ def parse_price_dataframe(raw_df, nifty_symbols):
     if date_col is None:
         date_col = df.columns[0]
 
-    # Long format: Date | Symbol | Close
     if symbol_col is not None and close_col is not None:
         dates = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
         closes = pd.to_numeric(df[close_col].astype(str).str.replace(",", "", regex=False), errors="coerce")
@@ -190,7 +248,6 @@ def parse_price_dataframe(raw_df, nifty_symbols):
         tmp = tmp.dropna(subset=["Date", "Symbol", "Close"])
         prices = tmp.pivot_table(index="Date", columns="Symbol", values="Close", aggfunc="last")
     else:
-        # Wide format: Date | RELIANCE | TCS | ...
         dates = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
         working = df.drop(columns=[date_col]).copy()
         kept = {}
@@ -209,22 +266,21 @@ def parse_price_dataframe(raw_df, nifty_symbols):
     prices = prices.loc[~prices.index.duplicated(keep="last")]
     prices.columns = normalize_symbols(prices.columns)
 
-    # Keep ONLY Nifty 500 symbols.
     keep = [c for c in prices.columns if c in set(nifty_symbols)]
     prices = prices[keep]
     prices = prices.apply(pd.to_numeric, errors="coerce")
     prices = prices.replace([np.inf, -np.inf], np.nan)
     prices = prices.dropna(axis=1, how="all")
-    return prices
+    return {"close": prices, "high": prices, "low": prices}
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def load_price_csv_bytes(file_bytes, filename, nifty_symbols):
     raw = pd.read_csv(io.BytesIO(file_bytes))
-    prices = parse_price_dataframe(raw, list(nifty_symbols))
-    if prices.empty:
+    ohlcv = parse_price_dataframe(raw, list(nifty_symbols))
+    if ohlcv["close"].empty:
         raise RuntimeError("No Nifty 500 price series could be identified in the CSV.")
-    return prices, f"CSV: {filename}"
+    return ohlcv, f"CSV: {filename}"
 
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
@@ -232,79 +288,16 @@ def load_google_sheet_csv(url, nifty_symbols):
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     raw = pd.read_csv(io.StringIO(r.text))
-    prices = parse_price_dataframe(raw, list(nifty_symbols))
-    if prices.empty:
+    ohlcv = parse_price_dataframe(raw, list(nifty_symbols))
+    if ohlcv["close"].empty:
         raise RuntimeError("The Google Sheet CSV did not contain usable Nifty 500 price columns.")
-    return prices, "Google Sheets / GOOGLEFINANCE CSV"
-
-
-# -------------------- ZERODHA DATA --------------------
-@st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
-def get_nse_equity_instruments(api_key, access_token):
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
-    rows = kite.instruments("NSE")
-    df = pd.DataFrame(rows)
-    df["tradingsymbol"] = df["tradingsymbol"].astype(str).str.upper()
-    eq = df[(df["segment"] == "NSE") & (df["instrument_type"] == "EQ")].copy()
-    return eq[["instrument_token", "tradingsymbol", "name"]]
-
-
-@st.cache_data(ttl=15 * 60, show_spinner=False)
-def fetch_zerodha_history(symbols, start_date, end_date, api_key, access_token, delay=0.35):
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
-    instruments = get_nse_equity_instruments(api_key, access_token)
-    token_map = dict(zip(instruments["tradingsymbol"], instruments["instrument_token"]))
-
-    frames, errors = [], []
-    symbols = list(symbols)
-    start = pd.Timestamp(start_date).date()
-    end = pd.Timestamp(end_date).date()
-
-    progress = st.progress(0, text="Downloading Zerodha daily candles…")
-    for i, symbol in enumerate(symbols, start=1):
-        token = token_map.get(symbol)
-        if token is None:
-            errors.append(f"{symbol}: no NSE EQ instrument token")
-        else:
-            try:
-                candles = kite.historical_data(token, start, end, "day", continuous=False, oi=False)
-                if candles:
-                    df = pd.DataFrame(candles)
-                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.tz_localize(None)
-                    df = df.dropna(subset=["date"]).set_index("date")
-                    close = pd.to_numeric(df["close"], errors="coerce").rename(symbol)
-                    frames.append(close)
-                else:
-                    errors.append(f"{symbol}: no historical candles")
-            except Exception as exc:
-                errors.append(f"{symbol}: {exc}")
-        progress.progress(i / len(symbols), text=f"Zerodha data: {i}/{len(symbols)} stocks")
-        if i < len(symbols):
-            time.sleep(max(float(delay), 0.34))
-    progress.empty()
-
-    if not frames:
-        raise RuntimeError("Zerodha returned no historical data. Check the daily login/session and API access.")
-    prices = pd.concat(frames, axis=1).sort_index()
-    prices = prices.loc[:, ~prices.columns.duplicated()]
-    prices = prices.replace([np.inf, -np.inf], np.nan)
-    cache_file = CACHE_DIR / f"zerodha_{safe_hash({'s': symbols, 'a': str(start), 'b': str(end)})}.parquet"
-    prices.to_parquet(cache_file)
-    status = f"Zerodha Kite Connect: {len(frames)}/{len(symbols)} Nifty 500 symbols loaded"
-    return prices, status, errors
+    return ohlcv, "Google Sheets / GOOGLEFINANCE CSV"
 
 
 # -------------------- DATA SOURCE MANAGER --------------------
-def get_data_source_prices(source, nifty_symbols, uploaded_price_file=None, google_url="", start=None, end=None,
-                            access_token=None, delay=0.35):
-    if source == "Zerodha Kite Connect":
-        if not access_token:
-            raise RuntimeError("Login to Zerodha first.")
-        return fetch_zerodha_history(
-            tuple(nifty_symbols), str(start), str(end), secret("KITE_API_KEY"), access_token, float(delay)
-        )
+def get_data_source_prices(source, nifty_symbols, uploaded_price_file=None, google_url="", start=None, end=None):
+    if source in ["Yahoo Finance", "Zerodha Live LTP + Yahoo Engine"]:
+        return fetch_yahoo_ohlcv(tuple(nifty_symbols), str(start), str(end))
 
     if source == "NSE / CSV upload":
         if uploaded_price_file is None:
@@ -320,15 +313,28 @@ def get_data_source_prices(source, nifty_symbols, uploaded_price_file=None, goog
 
 
 # -------------------- INDICATORS --------------------
-def calculate_snapshot(prices, as_of_date, ema_periods, ema_direction, retracement_mode, retracement_threshold):
+def calculate_snapshot(ohlcv, as_of_date, ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series=None):
+    prices = ohlcv["close"]
+    highs = ohlcv["high"]
+    lows = ohlcv["low"]
+
     actual_date = latest_available_date(prices, as_of_date)
     if actual_date is None:
         return pd.DataFrame()
+
     idx = prices.index.get_loc(actual_date)
-    current = prices.iloc[idx]
-    window = prices.iloc[max(0, idx - 251): idx + 1]
-    high_52 = window.max(skipna=True)
-    low_52 = window.min(skipna=True)
+    current = prices.iloc[idx].copy()
+
+    # Overlay live Zerodha LTP if requested for latest date
+    if live_ltp_series is not None and not live_ltp_series.empty:
+        current.update(live_ltp_series)
+
+    # 252-session High and Low calculated from High/Low matrices
+    window_high = highs.iloc[max(0, idx - 251): idx + 1]
+    window_low = lows.iloc[max(0, idx - 251): idx + 1]
+
+    high_52 = window_high.max(skipna=True)
+    low_52 = window_low.min(skipna=True)
     range_52 = high_52 - low_52
 
     out = pd.DataFrame({"Price": current, "52W High": high_52, "52W Low": low_52})
@@ -389,10 +395,10 @@ def rank_on_date(prices, as_of_date, lookbacks, weights):
     return composite.rank(ascending=True, method="min").sort_values()
 
 
-def build_signal_table(prices, as_of_date, target_n, exit_rank, lookbacks, weights,
-                       ema_periods, ema_direction, retracement_mode, retracement_threshold):
-    snap = calculate_snapshot(prices, as_of_date, ema_periods, ema_direction, retracement_mode, retracement_threshold)
-    ranks = rank_on_date(prices, as_of_date, lookbacks, weights)
+def build_signal_table(ohlcv, as_of_date, target_n, exit_rank, lookbacks, weights,
+                       ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series=None):
+    snap = calculate_snapshot(ohlcv, as_of_date, ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series)
+    ranks = rank_on_date(ohlcv["close"], as_of_date, lookbacks, weights)
     if snap.empty or ranks.empty:
         return pd.DataFrame()
     df = snap.join(ranks.rename("Momentum Rank"), how="left").dropna(subset=["Momentum Rank"]).copy()
@@ -430,8 +436,9 @@ def month_end_trading_dates(prices, start_date, end_date):
     return pd.Series(idx, index=idx).groupby(idx.to_period("M")).max().tolist()
 
 
-def run_backtest(prices, start_date, end_date, target_n, exit_rank, lookbacks, weights,
+def run_backtest(ohlcv, start_date, end_date, target_n, exit_rank, lookbacks, weights,
                  ema_periods, ema_direction, retracement_mode, retracement_threshold):
+    prices = ohlcv["close"]
     dates = month_end_trading_dates(prices, start_date, end_date)
     max_history = max(max(lookbacks), max(ema_periods or [0]), 252)
     valid_dates = [d for d in dates if prices.index.get_loc(d) >= max_history]
@@ -442,7 +449,7 @@ def run_backtest(prices, start_date, end_date, target_n, exit_rank, lookbacks, w
 
     for d in valid_dates:
         ranks = rank_on_date(prices, d, lookbacks, weights)
-        snap = calculate_snapshot(prices, d, ema_periods, ema_direction, retracement_mode, retracement_threshold)
+        snap = calculate_snapshot(ohlcv, d, ema_periods, ema_direction, retracement_mode, retracement_threshold)
         eligible = set(snap.index[snap["Eligible"]]) if not snap.empty else set()
         new_holdings, entries, exits = rebalance_portfolio(holdings, ranks, eligible, target_n, exit_rank)
         period_return = np.nan
@@ -492,7 +499,7 @@ def backtest_metrics(history):
 
 # -------------------- UI --------------------
 st.title("📈 Nifty 500 Momentum Portfolio & Backtesting Tool")
-st.caption("One app • one Nifty 500 universe • Zerodha / NSE-CSV / Google Finance-Sheets data options")
+st.caption("One app • Nifty 500 universe • Fast Yahoo Finance Engine + Zerodha Live LTP option")
 
 with st.sidebar:
     st.header("Universe")
@@ -510,7 +517,8 @@ with st.sidebar:
     data_source = st.radio(
         "Run the scanner using",
         [
-            "Zerodha Kite Connect",
+            "Zerodha Live LTP + Yahoo Engine",
+            "Yahoo Finance",
             "NSE / CSV upload",
             "Google Finance / Google Sheets CSV",
         ],
@@ -530,7 +538,7 @@ with st.sidebar:
         google_url = st.text_input(
             "Google Sheets CSV export URL",
             placeholder="https://docs.google.com/spreadsheets/d/.../export?format=csv",
-            help="Your Google Sheet can use GOOGLEFINANCE formulas, then expose the sheet as CSV. The app reads the exported values; GOOGLEFINANCE itself is a Google Sheets function, not a Zerodha-style API.",
+            help="Your Google Sheet can use GOOGLEFINANCE formulas, then expose the sheet as CSV.",
         )
 
     st.divider()
@@ -571,7 +579,7 @@ with st.sidebar:
             max_value=100.0,
             value=40.0,
             step=1.0,
-            help="High mode: price can be at most this % below its 52W high. Low mode: price must be at least this % up from the 52W low across the full 52W range.",
+            help="High mode: price can be at most this % below its 52W high. Low mode: price must be at least this % up from 52W low.",
         )
     else:
         retracement_mode = "Disabled"
@@ -579,14 +587,13 @@ with st.sidebar:
 
     st.divider()
     st.header("Data settings")
-    history_years = st.slider("History to load for Zerodha", 1, 8, 5, 1)
-    request_delay = st.number_input("Kite request delay (seconds)", 0.34, 2.0, 0.35, 0.01)
+    history_years = st.slider("History to load (years)", 1, 8, 5, 1)
     force_refresh = st.checkbox("Force refresh downloaded data", False)
 
     st.divider()
     st.header("Zerodha connection")
     kite, access_token, kite_status = get_kite_session()
-    if data_source == "Zerodha Kite Connect":
+    if data_source == "Zerodha Live LTP + Yahoo Engine":
         if kite is not None and access_token:
             st.success(kite_status)
             if st.button("Clear today's Zerodha session"):
@@ -600,14 +607,13 @@ with st.sidebar:
                 st.error("Could not create the Zerodha login URL.")
         else:
             st.error(kite_status)
-        st.info("Zerodha Redirect URL must be this deployed Streamlit app URL — NOT your GitHub repository URL.")
     else:
-        st.caption("Zerodha login is not required for the selected alternative data source.")
+        st.caption("Zerodha login is optional for this data source.")
 
     if force_refresh:
         load_price_csv_bytes.clear()
         load_google_sheet_csv.clear()
-        fetch_zerodha_history.clear()
+        fetch_yahoo_ohlcv.clear()
         get_nse_equity_instruments.clear()
 
 try:
@@ -631,26 +637,24 @@ if ema_enabled and not ema_periods:
 if exit_rank <= target_n:
     st.warning("For a rank buffer, Exit Rank should normally be higher than Top N.")
 
+
 # -------------------- COMMON DATA LOAD FUNCTION --------------------
 def load_for_run(start, end):
-    prices, source, warnings = get_data_source_prices(
+    ohlcv, source, warnings = get_data_source_prices(
         data_source,
         universe,
         uploaded_price_file=price_upload,
         google_url=google_url,
         start=start,
         end=end,
-        access_token=access_token,
-        delay=request_delay,
     )
-    if prices.empty:
+    if ohlcv["close"].empty:
         raise RuntimeError("No price data returned.")
-    if len(prices.columns) < 400:
+    if len(ohlcv["close"].columns) < 400:
         st.warning(
-            f"Only {len(prices.columns)} of the Nifty 500 symbols are available in this data source. "
-            "The scanner is filtering to the Nifty 500 universe and will not substitute a smaller built-in universe."
+            f"Only {len(ohlcv['close'].columns)} of the Nifty 500 symbols are available in this data source."
         )
-    return prices, source, warnings
+    return ohlcv, source, warnings
 
 
 # -------------------- TABS --------------------
@@ -669,9 +673,15 @@ with tab_portfolio:
         end = max(pd.Timestamp(portfolio_end), pd.Timestamp(portfolio_date))
         try:
             with st.status(f"Loading {data_source} data…", expanded=True):
-                prices, source, warnings = load_for_run(start.date(), end.date())
+                ohlcv, source, warnings = load_for_run(start.date(), end.date())
+                
+                live_ltp = None
+                if data_source == "Zerodha Live LTP + Yahoo Engine" and access_token:
+                    live_ltp, zerodha_errs = fetch_zerodha_live_ltp(universe, secret("KITE_API_KEY"), access_token)
+                    warnings.extend(zerodha_errs)
+
                 live = build_signal_table(
-                    prices,
+                    ohlcv,
                     portfolio_date,
                     int(target_n),
                     int(exit_rank),
@@ -681,14 +691,15 @@ with tab_portfolio:
                     ema_direction,
                     retracement_mode if retracement_enabled else "Disabled",
                     retracement_threshold,
+                    live_ltp_series=live_ltp,
                 )
                 if live.empty:
-                    raise RuntimeError("The selected data does not contain enough history to calculate the strategy on the selected date.")
-                st.session_state["portfolio_prices"] = prices
+                    raise RuntimeError("Insufficient historical data to calculate strategy on this date.")
+                st.session_state["portfolio_prices"] = ohlcv["close"]
                 st.session_state["portfolio_live"] = live
                 st.session_state["portfolio_source"] = source
                 st.session_state["portfolio_warnings"] = warnings
-                st.success(f"Portfolio built from: {source}")
+                st.success(f"Portfolio built using: {source}")
         except Exception as exc:
             st.error(f"Portfolio update failed: {exc}")
 
@@ -719,11 +730,6 @@ with tab_portfolio:
         st.markdown("### Full Nifty 500 scan")
         st.dataframe(live, use_container_width=True, hide_index=True)
 
-        st.info(
-            f"Data source: {st.session_state.get('portfolio_source', data_source)} • "
-            f"Retracement: {retracement_mode} = {retracement_threshold:g}% (single threshold, not a range)."
-        )
-
         if st.session_state.get("portfolio_warnings"):
             with st.expander("Data warnings"):
                 st.write("\n".join(st.session_state["portfolio_warnings"][:100]))
@@ -737,18 +743,11 @@ with tab_portfolio:
 
 with tab_backtest:
     st.subheader("Historical backtesting")
-    st.caption("This section is independent from the current portfolio section. Select exact historical dates and run the same rules.")
-
     b1, b2 = st.columns(2)
     with b1:
         bt_start = st.date_input("Backtest start date", date(2022, 1, 1), key="bt_start")
     with b2:
         bt_end = st.date_input("Backtest end date", date.today(), key="bt_end")
-
-    st.warning(
-        "Backtest uses the Nifty 500 universe selected above. Unless you upload historically correct constituent lists, "
-        "historical results can have survivorship bias because today's Nifty 500 membership is being applied to older dates."
-    )
 
     if st.button("🧪 Run Backtest", type="primary", use_container_width=True, key="backtest_run"):
         if bt_start >= bt_end:
@@ -757,10 +756,10 @@ with tab_backtest:
             history_pad = max(max(lookbacks), max(ema_periods or [0]), 252) * 2
             required_start = pd.Timestamp(bt_start) - pd.Timedelta(days=history_pad)
             try:
-                with st.status(f"Loading {data_source} data and running backtest…", expanded=True):
-                    prices, source, warnings = load_for_run(required_start.date(), bt_end)
+                with st.status(f"Loading data and running backtest…", expanded=True):
+                    ohlcv, source, warnings = load_for_run(required_start.date(), bt_end)
                     history = run_backtest(
-                        prices,
+                        ohlcv,
                         bt_start,
                         bt_end,
                         int(target_n),
@@ -773,7 +772,7 @@ with tab_backtest:
                         retracement_threshold,
                     )
                     st.session_state["backtest_history"] = history
-                    st.session_state["backtest_prices"] = prices
+                    st.session_state["backtest_prices"] = ohlcv["close"]
                     st.session_state["backtest_source"] = source
                     st.session_state["backtest_warnings"] = warnings
                     st.success(f"Backtest completed from: {source}")
@@ -796,32 +795,9 @@ with tab_backtest:
             st.markdown("### Rebalance / entry / exit history")
             st.dataframe(history, use_container_width=True, hide_index=True)
 
-            last = history.iloc[-1]
-            x, y, z = st.columns(3)
-            with x:
-                st.write("**Latest holdings**")
-                st.write(last["Holdings"] or "None")
-            with y:
-                st.write("**Latest entries**")
-                st.write(last["New Entries"] or "None")
-            with z:
-                st.write("**Latest exits**")
-                st.write(last["Exits"] or "None")
-
-            if st.session_state.get("backtest_warnings"):
-                with st.expander("Data warnings"):
-                    st.write("\n".join(st.session_state["backtest_warnings"][:100]))
-
             st.download_button(
                 "Download backtest CSV",
                 history.to_csv(index=False).encode("utf-8"),
                 "nifty500_backtest.csv",
                 "text/csv",
             )
-
-st.divider()
-st.caption(
-    "Research tool only. Zerodha uses the official Kite Connect login/token flow. "
-    "For Google Finance, use a Google Sheet containing GOOGLEFINANCE formulas and provide its CSV export URL. "
-    "Never commit API secrets or access tokens to GitHub."
-)
