@@ -1,6 +1,6 @@
-streamlit
-pandas
-numpy
-requests
-pyarrow
-kiteconnect
+streamlit>=1.40,<2
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+pyarrow>=16
+kiteconnect>=5.0
