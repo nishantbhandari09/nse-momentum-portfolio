@@ -89,20 +89,36 @@ def latest_available_date(df, requested_date):
 # -------------------- NIFTY 500 UNIVERSE --------------------
 @st.cache_data(ttl=24 * 60 * 60, show_spinner=False)
 def load_nifty500_official():
+    # Attempt 1: Fetch directly from NSE Live API
+    nse_url = "https://www.nseindia.com/api/equity-stockIndices?index=NIFTY%20500"
     headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/csv,application/csv,text/plain,*/*",
-        "Referer": "https://www.niftyindices.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
     }
-    r = requests.get(NIFTY500_URL, headers=headers, timeout=30)
+    try:
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=10)
+        response = session.get(nse_url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            stock_data = response.json().get("data", [])
+            symbols = [item["symbol"] for item in stock_data if item.get("symbol") and item["symbol"] != "NIFTY 500"]
+            symbols = normalize_symbols(symbols)
+            if len(symbols) >= 400:
+                return symbols, "Live NSE API (Nifty 500)"
+    except Exception:
+        pass  # Fall back to Nifty Indices CSV on connection error/block
+
+    # Attempt 2: Fallback to official CSV index source
+    r = requests.get(NIFTY500_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
     r.raise_for_status()
     df = pd.read_csv(io.StringIO(r.text))
     cols = {str(c).strip().lower(): c for c in df.columns}
     symbol_col = next((cols[k] for k in ("symbol", "ticker", "tradingsymbol") if k in cols), df.columns[0])
     symbols = normalize_symbols(df[symbol_col].dropna().tolist())
     if len(symbols) < 400:
-        raise RuntimeError(f"Nifty 500 file returned only {len(symbols)} symbols.")
-    return symbols, df
+        raise RuntimeError(f"Nifty 500 source returned only {len(symbols)} symbols.")
+    return symbols, "Official Nifty 500 CSV List"
 
 
 def get_universe(uploaded_universe):
@@ -112,8 +128,8 @@ def get_universe(uploaded_universe):
         symbol_col = next((cols[k] for k in ("symbol", "ticker", "tradingsymbol") if k in cols), df.columns[0])
         symbols = normalize_symbols(df[symbol_col].dropna().tolist())
         return symbols, "Uploaded Nifty 500 universe CSV"
-    symbols, _ = load_nifty500_official()
-    return symbols, "Official Nifty 500 constituent list"
+    symbols, source_label = load_nifty500_official()
+    return symbols, source_label
 
 
 # -------------------- ZERODHA AUTH --------------------
@@ -198,7 +214,6 @@ def fetch_zerodha_live_ltp(symbols, api_key, access_token):
     kite.set_access_token(access_token)
     keys = [f"NSE:{s}" for s in symbols]
     
-    # Kite LTP endpoint accepts max 500 instruments in chunks
     chunk_size = 250
     ltp_map = {}
     errors = []
@@ -325,11 +340,9 @@ def calculate_snapshot(ohlcv, as_of_date, ema_periods, ema_direction, retracemen
     idx = prices.index.get_loc(actual_date)
     current = prices.iloc[idx].copy()
 
-    # Overlay live Zerodha LTP if requested for latest date
     if live_ltp_series is not None and not live_ltp_series.empty:
         current.update(live_ltp_series)
 
-    # 252-session High and Low calculated from High/Low matrices
     window_high = highs.iloc[max(0, idx - 251): idx + 1]
     window_low = lows.iloc[max(0, idx - 251): idx + 1]
 
@@ -396,7 +409,7 @@ def rank_on_date(prices, as_of_date, lookbacks, weights):
 
 
 def build_signal_table(ohlcv, as_of_date, target_n, exit_rank, lookbacks, weights,
-                       ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series=None):
+                        ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series=None):
     snap = calculate_snapshot(ohlcv, as_of_date, ema_periods, ema_direction, retracement_mode, retracement_threshold, live_ltp_series)
     ranks = rank_on_date(ohlcv["close"], as_of_date, lookbacks, weights)
     if snap.empty or ranks.empty:
@@ -611,6 +624,7 @@ with st.sidebar:
         st.caption("Zerodha login is optional for this data source.")
 
     if force_refresh:
+        load_nifty500_official.clear()
         load_price_csv_bytes.clear()
         load_google_sheet_csv.clear()
         fetch_yahoo_ohlcv.clear()
@@ -756,7 +770,7 @@ with tab_backtest:
             history_pad = max(max(lookbacks), max(ema_periods or [0]), 252) * 2
             required_start = pd.Timestamp(bt_start) - pd.Timedelta(days=history_pad)
             try:
-                with st.status(f"Loading data and running backtest…", expanded=True):
+                with st.status("Loading data and running backtest…", expanded=True):
                     ohlcv, source, warnings = load_for_run(required_start.date(), bt_end)
                     history = run_backtest(
                         ohlcv,
@@ -798,6 +812,6 @@ with tab_backtest:
             st.download_button(
                 "Download backtest CSV",
                 history.to_csv(index=False).encode("utf-8"),
-                "nifty500_backtest.csv",
+                "nifty500_backtest_results.csv",
                 "text/csv",
             )
