@@ -269,7 +269,12 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date)
     if len(prices_df) < 252:
         return None
 
-    rebalance_dates = prices_df.resample('M').first().index
+    # Fixed resample alias from 'M' to 'ME' (Month End) or 'MS' (Month Start)
+    try:
+        rebalance_dates = prices_df.resample('ME').first().index
+    except ValueError:
+        rebalance_dates = prices_df.resample('MS').first().index
+
     portfolio_history = []
     current_cash = initial_capital
     current_holdings = {}
@@ -305,6 +310,9 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date)
                             current_cash -= (qty * stk_price)
 
         portfolio_history.append({"Date": dt, "Portfolio Value": total_val})
+
+    if not portfolio_history:
+        return None
 
     df_res = pd.DataFrame(portfolio_history).set_index("Date")
     return df_res
