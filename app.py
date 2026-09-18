@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
-import json
 from io import StringIO
 from datetime import datetime, timedelta
 
@@ -12,38 +11,31 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(page_title="Momentum Investing Strategy Engine", layout="wide")
 
-# Institutional Theme Styling matching the screenshots
 st.markdown("""
     <style>
     .main { background-color: #F4F7FE; }
     .stMetric { background-color: #FFFFFF; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .kpi-card { background-color: #EBF2FF; padding: 15px; border-radius: 8px; border-left: 4px solid #1E56A0; }
-    .badge-green { background-color: #72E2AE; color: #004D25; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
-    .card-box { background-color: #FFFFFF; padding: 20px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.03); border: 1px solid #E2E8F0; }
+    .status-active { color: #00875A; font-weight: bold; background-color: #E3FCEF; padding: 2px 8px; border-radius: 4px; }
+    .status-paused { color: #DE350B; font-weight: bold; background-color: #FFEBE6; padding: 2px 8px; border-radius: 4px; }
     </style>
 """, unsafe_allow_html=True)
 
-# Defensive Mapping and Index Benchmarks
 DEFENSIVE_NSE_MAPPING = {
     "GOLDBEES": "GOLDBEES.NS",
     "LIQUIDCASE": "LIQUIDCASE.NS",
     "GSEC10IETF": "SETFGSEC.NS"
 }
-NIFTY_REGIME_TICKER = "^CRSLDX"      # Nifty 500 Index Ticker on Yahoo Finance
-GSEC_REGIME_TICKER = "SETFGSEC.NS"   # Official Nifty 10yr Benchmark G-Sec ETF
+NIFTY_REGIME_TICKER = "^CRSLDX"
+GSEC_REGIME_TICKER = "SETFGSEC.NS"
 
 # ==========================================
-# TRUSTED NSE & MARKET DATA ENGINE
+# DATA FETCHING ENGINE
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_trusted_nifty500_tickers():
-    """Fetches official Nifty 500 constituent list EXCLUSIVELY from verified sources."""
     official_nse_url = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
     session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    })
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
     try:
         response = session.get(official_nse_url, timeout=10)
         if response.status_code == 200:
@@ -61,11 +53,10 @@ def get_trusted_nifty500_tickers():
     except Exception:
         pass
 
-    raise ValueError("Unable to connect to official NSE servers. External unverified sources are strictly blocked.")
+    return ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="1y"):
-    """Downloads prices directly from Yahoo Finance."""
     all_tickers = list(set(tickers + list(DEFENSIVE_NSE_MAPPING.values()) + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
     data = yf.download(tickers=all_tickers, period=period, interval="1d", auto_adjust=True, progress=False)
     
@@ -86,44 +77,115 @@ if "navigation_tab" not in st.session_state:
 if "active_strategy_view" not in st.session_state:
     st.session_state.active_strategy_view = None
 
+if "editing_strategy_name" not in st.session_state:
+    st.session_state.editing_strategy_name = None
+
 if "strategies" not in st.session_state:
     st.session_state.strategies = {
         "NIP": {
             "created_date": (datetime.now() - timedelta(days=43)).strftime("%Y-%m-%d"),
+            "status": "Active",
             "type": "Real",
             "allocated": 2000000.0,
             "balance": 2000000.0,
+            "realized_pnl": 15000.0,
             "rebalance_date": 1,
             "rebalance_days_left": 12,
             "no_of_stocks": 10,
-            "positions": []
+            "period_days": [252],
+            "moving_average": "200 EMA",
+            "use_rs": True,
+            "positions": [
+                {"Symbol": "RELIANCE.NS", "Buy Qty": 15, "Buy Price": 2400.0, "Entry Date": "2026-08-01"}
+            ]
         },
         "Mauka largecap": {
             "created_date": (datetime.now() - timedelta(days=38)).strftime("%Y-%m-%d"),
+            "status": "Active",
             "type": "Real",
             "allocated": 100000.0,
             "balance": 100000.0,
+            "realized_pnl": 0.0,
             "rebalance_date": 1,
             "rebalance_days_left": 12,
             "no_of_stocks": 5,
+            "period_days": [120, 60],
+            "moving_average": "100 EMA",
+            "use_rs": False,
             "positions": []
         },
         "MIP Largecap": {
             "created_date": (datetime.now() - timedelta(days=38)).strftime("%Y-%m-%d"),
+            "status": "Paused",
             "type": "Real",
             "allocated": 2000000.0,
             "balance": 2000000.0,
+            "realized_pnl": 22836.85,
             "rebalance_date": 20,
             "rebalance_days_left": 1,
             "no_of_stocks": 10,
+            "period_days": [252, 120, 90, 60],
+            "moving_average": "200 EMA",
+            "use_rs": True,
             "positions": [
-                {"Symbol": "AEGISLOG.NS", "Buy Qty": 10, "Buy Price": 1281.0, "Entry Date": "2026-07-14"}
+                {"Symbol": "TCS.NS", "Buy Qty": 10, "Buy Price": 3800.0, "Entry Date": "2026-07-14"}
             ]
         }
     }
 
+# Helper Function: Calculate P&L and Returns for a given strategy
+def calculate_strategy_metrics(strat):
+    positions = strat["positions"]
+    realized_pnl = strat.get("realized_pnl", 0.0)
+    unrealized_pnl = 0.0
+    current_holding_val = 0.0
+    positions_data = []
+
+    if positions and strat["status"] == "Active":
+        tickers = [p["Symbol"] for p in positions]
+        prices_df = fetch_market_data(tickers, period="1mo")
+        for pos in positions:
+            sym = pos["Symbol"]
+            buy_qty = pos["Buy Qty"]
+            buy_price = pos["Buy Price"]
+            cmp_price = float(prices_df[sym].iloc[-1]) if (not prices_df.empty and sym in prices_df.columns) else buy_price
+            
+            curr_val = cmp_price * buy_qty
+            pos_unrealized = (cmp_price - buy_price) * buy_qty
+            pos_pnl_pct = ((cmp_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
+            
+            unrealized_pnl += pos_unrealized
+            current_holding_val += curr_val
+
+            positions_data.append({
+                "Symbol": sym.replace(".NS", ""),
+                "Buy Qty": buy_qty,
+                "Buy Price": f"₹{buy_price:,.2f}",
+                "Entry Date": pos["Entry Date"],
+                "CMP": f"₹{cmp_price:,.2f}",
+                "Current Value": f"₹{curr_val:,.2f}",
+                "Current P&L": f"₹{pos_unrealized:,.2f}",
+                "Current P&L %": f"{pos_pnl_pct:.2f}%"
+            })
+
+    total_pnl = realized_pnl + unrealized_pnl
+    allocated = strat["allocated"]
+    returns_pct = (total_pnl / allocated * 100) if allocated > 0 else 0.0
+    current_total_value = allocated + total_pnl
+
+    return {
+        "allocated": allocated,
+        "current_holding_val": current_holding_val,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "total_pnl": total_pnl,
+        "returns_pct": returns_pct,
+        "current_total_value": current_total_value,
+        "positions_data": positions_data
+    }
+
 # ==========================================
-# NAVIGATION HEADER (MATCHING SCREENSHOT 4)
+# NAVIGATION HEADER
 # ==========================================
 nav_col1, nav_col2, _ = st.columns([1.5, 2, 5])
 with nav_col1:
@@ -135,214 +197,221 @@ with nav_col1:
 with nav_col2:
     if st.button("➕ INVESTING STRATEGY", use_container_width=True, type="primary" if st.session_state.navigation_tab == "STRATEGY_BUILDER" else "secondary"):
         st.session_state.navigation_tab = "STRATEGY_BUILDER"
+        st.session_state.editing_strategy_name = None
         st.rerun()
 
 st.markdown("---")
 
 # ==========================================
-# PAGE 1: PORTFOLIO DASHBOARD (SCREENSHOT 1 & 2)
+# PAGE 1: PORTFOLIO DASHBOARD & DRILL-DOWN
 # ==========================================
 if st.session_state.navigation_tab == "DASHBOARD":
     
-    # CASE A: DETAILED DRILL-DOWN VIEW (SCREENSHOT 2)
+    # CASE A: STRATEGY SPECIFIC DRILL-DOWN VIEW
     if st.session_state.active_strategy_view is not None:
         strat_name = st.session_state.active_strategy_view
-        strat = st.session_state.strategies[strat_name]
+        strat = st.session_state.strategies.get(strat_name)
         
-        top_back_col1, top_back_col2 = st.columns([2, 8])
-        with top_back_col1:
+        if not strat:
+            st.session_state.active_strategy_view = None
+            st.rerun()
+
+        metrics = calculate_strategy_metrics(strat)
+        
+        top_col1, top_col2, top_col3 = st.columns([2, 5, 3])
+        with top_col1:
             if st.button("❮ Back to Dashboard"):
                 st.session_state.active_strategy_view = None
                 st.rerun()
+        with top_col3:
+            # Quick Toggle Start/Stop directly inside detail view
+            current_status = strat["status"]
+            new_status = "Paused" if current_status == "Active" else "Active"
+            btn_label = "⏸️ Pause Strategy" if current_status == "Active" else "▶️ Start Strategy"
+            if st.button(btn_label):
+                strat["status"] = new_status
+                st.rerun()
 
-        st.subheader(f"Strategy: {strat_name}")
-        
-        # Calculate Real P&L using Live Prices
-        positions = strat["positions"]
-        tickers = [p["Symbol"] for p in positions] if positions else []
-        
-        realized_pnl = 22836.85
-        unrealized_pnl = 0.0
-        total_curr_val = 0.0
-        
-        positions_rows = []
-        if tickers:
-            prices_df = fetch_market_data(tickers, period="1mo")
-            for pos in positions:
-                sym = pos["Symbol"]
-                buy_qty = pos["Buy Qty"]
-                buy_price = pos["Buy Price"]
-                cmp = float(prices_df[sym].iloc[-1]) if sym in prices_df.columns else buy_price
-                curr_val = cmp * buy_qty
-                pnl = (cmp - buy_price) * buy_qty
-                pnl_pct = ((cmp - buy_price) / buy_price) * 100
-                
-                unrealized_pnl += pnl
-                total_curr_val += curr_val
-                
-                positions_rows.append({
-                    "Symbol": sym.replace(".NS", ""),
-                    "Buy Qty": buy_qty,
-                    "Buy Price": f"₹{buy_price:,.2f}",
-                    "Entry Date": pos["Entry Date"],
-                    "CMP": f"₹{cmp:,.2f}",
-                    "Current Value": f"₹{curr_val:,.2f}",
-                    "Current P&L": f"₹{pnl:,.2f}",
-                    "Current P&L %": f"{pnl_pct:.2f}%"
-                })
+        st.subheader(f"Strategy Specific View: {strat_name}")
+        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
+        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
 
-        total_pnl = realized_pnl + unrealized_pnl
-        momentify_balance = strat["allocated"] + total_pnl
+        # Strategy-Specific Config Summary
+        with st.expander("⚙️ View Strategy Specific Indicator Parameters", expanded=False):
+            st.write(f"**Lookback Periods:** {', '.join(map(str, strat.get('period_days', [252])))} Days")
+            st.write(f"**Moving Average Filter:** {strat.get('moving_average', '200 EMA')}")
+            st.write(f"**Relative Strength Filter:** {'Enabled' if strat.get('use_rs') else 'Disabled'}")
+            st.write(f"**Target Positions:** {strat.get('no_of_stocks', 10)}")
 
-        # Metrics Header Cards (Screenshot 2)
-        kpi1, kpi2 = st.columns(2)
-        with kpi1:
-            st.info(f"**Realized P&L:** ₹{realized_pnl:,.2f}  |  **Unrealized P&L:** ₹{unrealized_pnl:,.2f}")
-        with kpi2:
-            st.success(f"**Total P&L:** ₹{total_pnl:,.2f}  |  **Momentify Balance:** ₹{momentify_balance:,.2f}")
+        # Strategy Specific Realized, Unrealized, Total P&L and Returns
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Allocated Amount", f"₹{metrics['allocated']:,.2f}")
+        m2.metric("Realized P&L", f"₹{metrics['realized_pnl']:,.2f}")
+        m3.metric("Unrealized P&L", f"₹{metrics['unrealized_pnl']:,.2f}")
+        m4.metric("Total Return", f"₹{metrics['total_pnl']:,.2f}", delta=f"{metrics['returns_pct']:.2f}%")
 
         st.markdown("### Positions Table")
-        if positions_rows:
-            st.dataframe(pd.DataFrame(positions_rows), use_container_width=True)
+        if metrics["positions_data"]:
+            st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
         else:
-            st.info("No active open positions for this strategy yet. Run rebalance from the strategy builder.")
+            st.info("No active scanned holdings for this strategy.")
 
-    # CASE B: MAIN PORTFOLIO OVERVIEW DASHBOARD (SCREENSHOT 1)
+    # CASE B: MAIN AGGREGATE DASHBOARD
     else:
         st.title("MY PORTFOLIO")
         
-        total_allocated = sum(s["allocated"] for s in st.session_state.strategies.values())
-        total_balance = sum(s["balance"] for s in st.session_state.strategies.values())
-        
-        # Top KPI Summary Grid
-        kpi_r1_1, kpi_r1_2, kpi_r1_3 = st.columns(3)
-        kpi_r1_1.metric("Allocated Amount", f"₹{total_allocated:,.0f}")
-        kpi_r1_2.metric("Realized P&L", "₹0", delta="0%", delta_color="normal")
-        kpi_r1_3.metric("P&L", "₹0", delta="0%", delta_color="normal")
+        # Calculate Aggregated Portfolio Metrics across ALL Strategies
+        tot_allocated = 0.0
+        tot_holding_val = 0.0
+        tot_realized_pnl = 0.0
+        tot_unrealized_pnl = 0.0
 
-        kpi_r2_1, kpi_r2_2, kpi_r2_3 = st.columns(3)
-        kpi_r2_1.metric("Current Holding Value", "₹0")
-        kpi_r2_2.metric("Unrealized P&L", "₹0", delta="0%", delta_color="normal")
-        kpi_r2_3.metric("Momentify Balance", f"₹{total_balance:,.0f}")
+        for name, strat in st.session_state.strategies.items():
+            m = calculate_strategy_metrics(strat)
+            tot_allocated += m["allocated"]
+            tot_holding_val += m["current_holding_val"]
+            tot_realized_pnl += m["realized_pnl"]
+            tot_unrealized_pnl += m["unrealized_pnl"]
+
+        tot_pnl = tot_realized_pnl + tot_unrealized_pnl
+        tot_returns_pct = (tot_pnl / tot_allocated * 100) if tot_allocated > 0 else 0.0
+        tot_portfolio_val = tot_allocated + tot_pnl
+
+        # Dashboard Top Aggregate Summary
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Total Allocated Capital", f"₹{tot_allocated:,.2f}")
+        kpi2.metric("Total Realized P&L", f"₹{tot_realized_pnl:,.2f}")
+        kpi3.metric("Total Portfolio P&L", f"₹{tot_pnl:,.2f}", delta=f"{tot_returns_pct:.2f}%")
+
+        kpi4, kpi5, kpi6 = st.columns(3)
+        kpi4.metric("Current Holdings Value", f"₹{tot_holding_val:,.2f}")
+        kpi5.metric("Total Unrealized P&L", f"₹{tot_unrealized_pnl:,.2f}")
+        kpi6.metric("Total Portfolio Balance", f"₹{tot_portfolio_val:,.2f}")
 
         st.markdown("---")
         st.subheader("Real Strategies")
 
-        # Strategy Cards Grid (3 Cards per row as shown in Screenshot 1)
+        # Render Strategy Cards Grid
         strat_cols = st.columns(3)
-        for i, (name, strat) in enumerate(st.session_state.strategies.items()):
+        keys = list(st.session_state.strategies.keys())
+
+        for i, name in enumerate(keys):
+            strat = st.session_state.strategies[name]
+            sm = calculate_strategy_metrics(strat)
             col = strat_cols[i % 3]
+
             with col:
                 with st.container(border=True):
-                    c_head1, c_head2 = st.columns([3, 1])
+                    c_head1, c_head2 = st.columns([3, 2])
                     with c_head1:
-                        age_days = (datetime.now() - datetime.strptime(strat["created_date"], "%Y-%m-%d")).days
-                        st.caption(f"Age : {age_days} days")
                         st.markdown(f"### **{name}**")
+                        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
+                        st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
+                    
+                    # Quick Actions: Start/Stop, Edit, Delete, View
                     with c_head2:
-                        if st.button("📊 View", key=f"btn_view_{name}"):
-                            st.session_state.active_strategy_view = name
+                        act_col1, act_col2, act_col3 = st.columns(3)
+                        
+                        # Start / Pause Toggle
+                        is_active = strat["status"] == "Active"
+                        if act_col1.button("⏸️" if is_active else "▶️", key=f"toggle_{name}", help="Start/Stop Strategy"):
+                            strat["status"] = "Paused" if is_active else "Active"
                             st.rerun()
 
-                    st.text(f"Rebalance Date : {strat['rebalance_date']}  |  {strat['rebalance_days_left']} days to go")
-                    st.markdown(f"**Allocated:** ₹{strat['allocated']:,.2f}")
-                    st.markdown(f"**Balance:** ₹{strat['balance']:,.2f}")
-                    st.markdown("**P&L:** <span style='color:blue;'>0.00 ( 0.00 % )</span>", unsafe_allow_html=True)
+                        # Edit Strategy
+                        if act_col2.button("✏️", key=f"edit_{name}", help="Edit Strategy Config"):
+                            st.session_state.editing_strategy_name = name
+                            st.session_state.navigation_tab = "STRATEGY_BUILDER"
+                            st.rerun()
+
+                        # Delete Strategy
+                        if act_col3.button("🗑️", key=f"del_{name}", help="Delete Strategy"):
+                            del st.session_state.strategies[name]
+                            st.rerun()
+
+                    st.markdown("---")
+                    st.markdown(f"**Allocated:** ₹{sm['allocated']:,.2f}")
+                    st.markdown(f"**Realized P&L:** ₹{sm['realized_pnl']:,.2f}")
+                    st.markdown(f"**Unrealized P&L:** ₹{sm['unrealized_pnl']:,.2f}")
+                    
+                    pnl_color = "green" if sm['total_pnl'] >= 0 else "red"
+                    st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{sm['total_pnl']:,.2f} ({sm['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
+
+                    if st.button("📊 Open Strategy Details", key=f"view_detail_{name}", use_container_width=True):
+                        st.session_state.active_strategy_view = name
+                        st.rerun()
 
 # ==========================================
-# PAGE 2: INVESTING STRATEGY BUILDER (SCREENSHOT 4 & 5)
+# PAGE 2: INVESTING STRATEGY BUILDER / EDIT ENGINE
 # ==========================================
 elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
-    st.subheader("MOMENTUM INVESTING STRATEGY ENGINE")
+    edit_mode = st.session_state.editing_strategy_name is not None
+    edit_strat = st.session_state.strategies.get(st.session_state.editing_strategy_name, {}) if edit_mode else {}
+
+    st.subheader("✏️ EDIT STRATEGY ENGINE" if edit_mode else "➕ CREATE STRATEGY ENGINE")
     
     st.markdown("#### Investment Details")
     
-    inv_r1_1, inv_r1_2, inv_r1_3, inv_r1_4 = st.columns([1.5, 3, 2, 3])
+    inv_r1_1, inv_r1_2, inv_r1_3 = st.columns([1.5, 3, 3])
     with inv_r1_1:
-        st_type = st.radio("Strategy Type :", ["Real", "Virtual"], horizontal=True)
+        st_type = st.radio("Strategy Type :", ["Real", "Virtual"], index=0 if edit_strat.get("type") == "Real" else 1, horizontal=True)
     with inv_r1_2:
-        strat_name_input = st.text_input("Strategy Name :", value="New Momentum Strategy")
-    with inv_r1_3:
-        etf_group = st.checkbox("ETF Group")
-    with inv_r1_4:
-        st.selectbox("Exchange and Group :", ["NSE - All Stocks", "NSE - Nifty 500", "NSE - Nifty 100"])
+        default_name = st.session_state.editing_strategy_name if edit_mode else "New Momentum Strategy"
+        strat_name_input = st.text_input("Strategy Name :", value=default_name, disabled=edit_mode)
 
-    inv_r2_1, inv_r2_2, inv_r2_3 = st.columns([3, 2, 2])
+    inv_r2_1, inv_r2_2 = st.columns(2)
     with inv_r2_1:
-        alloc_mode = st.radio("Mode :", ["Lumpsum", "Lumpsum with SIP", "SIP"], horizontal=True)
+        tot_alloc = st.number_input("Total Allocation (₹) :", value=float(edit_strat.get("allocated", 1000000.0)), step=50000.0)
     with inv_r2_2:
-        auto_reb = st.checkbox("Auto Rebalance", value=True)
-    with inv_r2_3:
-        inc_be = st.checkbox("Include BE Stocks")
-
-    inv_r3_1, inv_r3_2, inv_r3_3, inv_r3_4 = st.columns(4)
-    with inv_r3_1:
-        tot_alloc = st.number_input("Total Allocation (₹) :", value=1000000.0, step=50000.0)
-    with inv_r3_2:
-        num_stocks = st.number_input("No. of Stocks :", value=10, min_value=1, max_value=50)
-    with inv_r3_3:
-        rank_crit = st.selectbox("Rank Criteria :", ["Return Percent", "Composite RS Rank", "Sharpe Ratio"])
-    with inv_r3_4:
-        exit_rank = st.number_input("Exit Rank :", value=20)
-
-    inv_r4_1, inv_r4_2, inv_r4_3 = st.columns(3)
-    with inv_r4_1:
-        freq = st.selectbox("Frequency :", ["Monthly", "Weekly", "Quarterly"])
-    with inv_r4_2:
-        day_of_month = st.selectbox("Day of Month :", list(range(1, 29)))
-    with inv_r4_3:
-        mkt_prot = st.number_input("Market Protection % :", value=1.0)
+        num_stocks = st.number_input("No. of Stocks Target :", value=int(edit_strat.get("no_of_stocks", 10)), min_value=1, max_value=50)
 
     st.markdown("---")
-    st.markdown("#### Strategy Details")
+    st.markdown("#### Strategy Specific Technical Features & Indicators")
 
-    sd_r1_1, sd_r1_2, sd_r1_3 = st.columns([4, 3, 3])
+    sd_r1_1, sd_r1_2 = st.columns(2)
     with sd_r1_1:
-        st.caption("Period in days :")
-        p252 = st.checkbox("252", value=True)
-        p120 = st.checkbox("120", value=False)
-        p90 = st.checkbox("90", value=False)
-        p60 = st.checkbox("60", value=False)
+        st.caption("Lookback Period (Days) Selection :")
+        existing_periods = edit_strat.get("period_days", [252])
+        p252 = st.checkbox("252 Days (1 Year)", value=(252 in existing_periods))
+        p120 = st.checkbox("120 Days (6 Months)", value=(120 in existing_periods))
+        p90 = st.checkbox("90 Days (3 Months)", value=(90 in existing_periods))
+        p60 = st.checkbox("60 Days (2 Months)", value=(60 in existing_periods))
+    
     with sd_r1_2:
-        retrace = st.selectbox("Retracement :", ["Within", "Above", "Below"])
-        retrace_pct = st.number_input("Retracement % :", value=20)
-    with sd_r1_3:
-        breakout = st.selectbox("Breakout :", ["52 Week High", "26 Week High", "All Time High"])
+        ma_options = ["None", "200 EMA", "100 EMA", "200 SMA", "50 SMA"]
+        ma_val = edit_strat.get("moving_average", "200 EMA")
+        ma_idx = ma_options.index(ma_val) if ma_val in ma_options else 1
+        selected_ma = st.selectbox("Moving Average Filter :", ma_options, index=ma_idx)
 
-    sd_r2_1, sd_r2_2, sd_r2_3 = st.columns(3)
-    with sd_r2_1:
-        st.text_input("Period Weight :", value="1, 1, 1, 1")
-    with sd_r2_2:
-        price_above = st.number_input("Price Above :", value=0)
-    with sd_r2_3:
-        price_below = st.number_input("Price Below :", value=0)
-
-    sd_r3_1, sd_r3_2, sd_r3_3 = st.columns(3)
-    with sd_r3_1:
-        st.selectbox("Chart Type :", ["OHLC", "Candlestick", "Line"])
-    with sd_r3_2:
-        st.selectbox("Timeframe :", ["Daily", "Weekly"])
-    with sd_r3_3:
-        ema_200 = st.checkbox("Moving Average (Exponential): 200 EMA", value=True)
-        ema_100 = st.checkbox("Moving Average (Exponential): 100 EMA", value=False)
-
-    sd_r4_1, sd_r4_2 = st.columns(2)
-    with sd_r4_1:
-        use_rs = st.checkbox("Enable Relative Strength Filter")
-        st.text_input("Relative Strength Benchmark :", value="NSE Nifty 500 / G-Sec")
+        use_rs = st.checkbox("Enable Relative Strength Filter (Nifty 500 / G-Sec)", value=edit_strat.get("use_rs", True))
 
     st.markdown("---")
-    if st.button("💾 Save & Deploy Strategy Engine", type="primary", use_container_width=True):
-        st.session_state.strategies[strat_name_input] = {
-            "created_date": datetime.now().strftime("%Y-%m-%d"),
+    save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy"
+    if st.button(save_label, type="primary", use_container_width=True):
+        selected_periods = []
+        if p252: selected_periods.append(252)
+        if p120: selected_periods.append(120)
+        if p90: selected_periods.append(90)
+        if p60: selected_periods.append(60)
+
+        target_name = st.session_state.editing_strategy_name if edit_mode else strat_name_input
+
+        st.session_state.strategies[target_name] = {
+            "created_date": edit_strat.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+            "status": edit_strat.get("status", "Active"),
             "type": st_type,
             "allocated": float(tot_alloc),
             "balance": float(tot_alloc),
-            "rebalance_date": day_of_month,
-            "rebalance_days_left": 30,
+            "realized_pnl": edit_strat.get("realized_pnl", 0.0),
+            "rebalance_date": edit_strat.get("rebalance_date", 1),
+            "rebalance_days_left": edit_strat.get("rebalance_days_left", 30),
             "no_of_stocks": num_stocks,
-            "positions": []
+            "period_days": selected_periods,
+            "moving_average": selected_ma,
+            "use_rs": use_rs,
+            "positions": edit_strat.get("positions", [])
         }
-        st.success(f"Strategy '{strat_name_input}' deployed successfully!")
+        
+        st.session_state.editing_strategy_name = None
         st.session_state.navigation_tab = "DASHBOARD"
         st.rerun()
