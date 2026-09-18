@@ -20,7 +20,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Group Mapping for ETFs and Defensive Assets
 ASSET_GROUPS_MAPPING = {
     "Gold ETF": ["GOLDBEES.NS"],
     "LiquidBEES": ["LIQUIDCASE.NS"],
@@ -38,7 +37,6 @@ GSEC_REGIME_TICKER = "SETFGSEC.NS"
 def get_trusted_tickers_by_group(groups):
     tickers = []
     
-    # 1. Check for Equity Index Groups
     if "Nifty 500" in groups or "Nifty 200" in groups:
         official_nse_url = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
         session = requests.Session()
@@ -66,7 +64,6 @@ def get_trusted_tickers_by_group(groups):
             except Exception:
                 tickers.extend(["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "SBIN.NS"])
 
-    # 2. Check for ETF Asset Groups
     for grp in groups:
         if grp in ASSET_GROUPS_MAPPING:
             tickers.extend(ASSET_GROUPS_MAPPING[grp])
@@ -107,12 +104,12 @@ if "strategies" not in st.session_state:
             "created_date": (datetime.now() - timedelta(days=43)).strftime("%Y-%m-%d"),
             "status": "Active",
             "type": "Real",
-            "allocated": 2000000.0,
-            "realized_pnl": 18500.0,
+            "allocated": 100000.0,
+            "realized_pnl": 0.0,
             "rebalance_freq": "Monthly",
             "rebalance_day": 1,
             "groups": ["Nifty 500", "Gold ETF"],
-            "allocation_multiplier": 1.5,
+            "allocation_multiplier": 1.0,
             "entry_rank": 10,
             "exit_rank": 20,
             "period_days": [252, 120, 60],
@@ -122,36 +119,12 @@ if "strategies" not in st.session_state:
             "moving_average": "200 EMA",
             "use_rs": True,
             "rs_benchmark": "Nifty 500 / G-Sec",
-            "positions": [
-                {"Symbol": "RELIANCE.NS", "Buy Qty": 15, "Buy Price": 2400.0, "Entry Date": "2026-08-01"},
-                {"Symbol": "TCS.NS", "Buy Qty": 10, "Buy Price": 3800.0, "Entry Date": "2026-08-01"}
-            ]
-        },
-        "Defensive RS Rotation": {
-            "created_date": (datetime.now() - timedelta(days=38)).strftime("%Y-%m-%d"),
-            "status": "Active",
-            "type": "Real",
-            "allocated": 1000000.0,
-            "realized_pnl": 5200.0,
-            "rebalance_freq": "Monthly",
-            "rebalance_day": 15,
-            "groups": ["Nifty 200", "Gov Bond", "LiquidBEES"],
-            "allocation_multiplier": 1.0,
-            "entry_rank": 5,
-            "exit_rank": 10,
-            "period_days": [120, 60],
-            "period_weights": [0.6, 0.4],
-            "pct_from_high": 20.0,
-            "pct_from_low": 0.0,
-            "moving_average": "100 EMA",
-            "use_rs": True,
-            "rs_benchmark": "Nifty 500 / G-Sec",
             "positions": []
         }
     }
 
 # ==========================================
-# METRICS, SCANNER & BACKTEST LOGIC
+# METRICS & CALCULATIONS ENGINE
 # ==========================================
 def calculate_days_to_rebalance(rebalance_day):
     today = datetime.now()
@@ -166,23 +139,31 @@ def calculate_days_to_rebalance(rebalance_day):
 def calculate_strategy_metrics(strat):
     positions = strat.get("positions", [])
     realized_pnl = strat.get("realized_pnl", 0.0)
+    allocated = strat["allocated"]
+    
     unrealized_pnl = 0.0
     current_holding_val = 0.0
+    total_cost_basis = 0.0
     positions_data = []
 
     if positions and strat["status"] == "Active":
         tickers = [p["Symbol"] for p in positions]
         prices_df = fetch_market_data(tickers, period="1mo")
+        
         for pos in positions:
             sym = pos["Symbol"]
             buy_qty = pos["Buy Qty"]
             buy_price = pos["Buy Price"]
-            cmp_price = float(prices_df[sym].iloc[-1]) if (not prices_df.empty and sym in prices_df.columns) else buy_price
             
+            # Fetch latest adjusted close
+            cmp_price = float(prices_df[sym].dropna().iloc[-1]) if (not prices_df.empty and sym in prices_df.columns) else buy_price
+            
+            cost_val = buy_price * buy_qty
             curr_val = cmp_price * buy_qty
-            pos_unrealized = (cmp_price - buy_price) * buy_qty
+            pos_unrealized = curr_val - cost_val
             pos_pnl_pct = ((cmp_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
             
+            total_cost_basis += cost_val
             unrealized_pnl += pos_unrealized
             current_holding_val += curr_val
 
@@ -197,13 +178,15 @@ def calculate_strategy_metrics(strat):
                 "Current P&L %": f"{pos_pnl_pct:.2f}%"
             })
 
+    # Account for remaining uninvested cash buffer
+    cash_reserve = max(0.0, allocated - total_cost_basis) if total_cost_basis > 0 else allocated
     total_pnl = realized_pnl + unrealized_pnl
-    allocated = strat["allocated"]
     returns_pct = (total_pnl / allocated * 100) if allocated > 0 else 0.0
-    current_total_value = allocated + total_pnl
+    current_total_value = cash_reserve + current_holding_val + realized_pnl
 
     return {
         "allocated": allocated,
+        "cash_reserve": cash_reserve,
         "current_holding_val": current_holding_val,
         "realized_pnl": realized_pnl,
         "unrealized_pnl": unrealized_pnl,
@@ -228,7 +211,7 @@ def run_strategy_stock_scanner(strat, price_subset=None):
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
 
-    # 1. Moving Average Filter
+    # Moving Average Filter
     ma_config = strat.get("moving_average", "200 EMA")
     if ma_config != "None":
         period = 200 if "200" in ma_config else (100 if "100" in ma_config else 50)
@@ -239,14 +222,14 @@ def run_strategy_stock_scanner(strat, price_subset=None):
             ma_vals = prices_df.rolling(window=period).mean().iloc[-1]
         filtered_df = filtered_df.loc[:, latest_prices > ma_vals]
 
-    # 2. Period High/Low Proximity Filter
+    # Period High/Low Proximity Filter
     pct_high = strat.get("pct_from_high", 15.0)
     if pct_high > 0 and len(filtered_df) >= 252:
         period_high = filtered_df.iloc[-252:].max()
         pct_diff = ((period_high - latest_prices) / period_high) * 100
         filtered_df = filtered_df.loc[:, pct_diff <= pct_high]
 
-    # 3. Relative Strength (RS) Ratio Regime Filter
+    # Relative Strength (RS) Ratio Filter
     if strat.get("use_rs", True):
         if NIFTY_REGIME_TICKER in prices_df.columns and GSEC_REGIME_TICKER in prices_df.columns:
             rs_ratio = prices_df[NIFTY_REGIME_TICKER] / prices_df[GSEC_REGIME_TICKER]
@@ -254,7 +237,7 @@ def run_strategy_stock_scanner(strat, price_subset=None):
             if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
                 return [ASSET_GROUPS_MAPPING["Gov Bond"][0]]
 
-    # 4. Multi-Period Momentum Composite Ranking
+    # Composite Ranking
     periods = strat.get("period_days", [252, 120, 60])
     weights = strat.get("period_weights", [0.5, 0.3, 0.2])
     
@@ -310,13 +293,16 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date)
             effective_pool = total_val * multiplier
             alloc_per_stock = effective_pool / len(selected_stocks)
             current_holdings = {}
-            current_cash = 0.0
+            current_cash = total_val  # Reset cash pool
+
             for sym in selected_stocks:
                 if sym in historical_sub_df.columns:
                     stk_price = historical_sub_df[sym].iloc[-1]
                     if stk_price > 0:
-                        qty = alloc_per_stock / stk_price
-                        current_holdings[sym] = qty
+                        qty = int(alloc_per_stock // stk_price)
+                        if qty > 0:
+                            current_holdings[sym] = qty
+                            current_cash -= (qty * stk_price)
 
         portfolio_history.append({"Date": dt, "Portfolio Value": total_val})
 
@@ -380,7 +366,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Allocated Capital", f"₹{metrics['allocated']:,.2f}")
-        m2.metric("Realized P&L", f"₹{metrics['realized_pnl']:,.2f}")
+        m2.metric("Uninvested Cash", f"₹{metrics['cash_reserve']:,.2f}")
         m3.metric("Unrealized P&L", f"₹{metrics['unrealized_pnl']:,.2f}")
         m4.metric("Total P&L & Returns", f"₹{metrics['total_pnl']:,.2f}", delta=f"{metrics['returns_pct']:.2f}%")
 
@@ -414,7 +400,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
                 prices_df = fetch_market_data(scanned_results, period="5d")
                 scanned_rows = []
                 for ticker in scanned_results:
-                    cmp = float(prices_df[ticker].iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 0.0
+                    cmp = float(prices_df[ticker].dropna().iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 0.0
                     scanned_rows.append({
                         "Symbol": ticker.replace(".NS", ""),
                         "CMP": f"₹{cmp:,.2f}",
@@ -426,22 +412,25 @@ if st.session_state.navigation_tab == "DASHBOARD":
                 reinvest_pool = metrics["current_total_value"] * strat.get("allocation_multiplier", 1.0)
                 per_stock_alloc = reinvest_pool / len(scanned_results) if scanned_results else 0.0
                 
-                prices_df = fetch_market_data(scanned_results, period="1d")
+                prices_df = fetch_market_data(scanned_results, period="5d")
                 new_positions = []
+                
                 for ticker in scanned_results:
-                    cmp = float(prices_df[ticker].iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 1.0
+                    cmp = float(prices_df[ticker].dropna().iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 1.0
                     qty = int(per_stock_alloc // cmp) if cmp > 0 else 0
-                    new_positions.append({
-                        "Symbol": ticker,
-                        "Buy Qty": qty if qty > 0 else 1,
-                        "Buy Price": cmp,
-                        "Entry Date": datetime.now().strftime("%Y-%m-%d")
-                    })
+                    
+                    if qty > 0:
+                        new_positions.append({
+                            "Symbol": ticker,
+                            "Buy Qty": qty,
+                            "Buy Price": cmp,  # Synchronized with current market close
+                            "Entry Date": datetime.now().strftime("%Y-%m-%d")
+                        })
 
                 strat["positions"] = new_positions
                 strat["realized_pnl"] = metrics["total_pnl"]
                 st.session_state[f"scanned_results_{strat_name}"] = None
-                st.success(f"Rebalanced! Reinvested effective amount of ₹{reinvest_pool:,.2f} ({strat.get('allocation_multiplier', 1.0)}x multiplier) across {len(scanned_results)} assets.")
+                st.success(f"Rebalanced! Reinvested effective amount of ₹{reinvest_pool:,.2f} ({strat.get('allocation_multiplier', 1.0)}x multiplier) across {len(new_positions)} assets.")
                 st.rerun()
 
         else:
@@ -547,7 +536,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         default_name = st.session_state.editing_strategy_name if edit_mode else "New Momentum Strategy"
         strat_name_input = st.text_input("Strategy Name :", value=default_name, disabled=edit_mode)
     with inv_r2:
-        tot_alloc = st.number_input("Total Allocation Capital (₹) :", value=float(edit_strat.get("allocated", 1000000.0)), step=50000.0)
+        tot_alloc = st.number_input("Total Allocation Capital (₹) :", value=float(edit_strat.get("allocated", 100000.0)), step=10000.0)
         rebal_freq = st.selectbox("Rebalance Frequency :", ["Monthly", "Weekly", "Quarterly"])
     with inv_r3:
         rebal_day = st.number_input("Rebalance Day of Month (1-28) :", value=int(edit_strat.get("rebalance_day", 1)), min_value=1, max_value=28)
@@ -671,7 +660,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
     bt_c1, bt_c2, bt_c3 = st.columns(3)
     with bt_c1:
-        initial_cap = st.number_input("Initial Backtest Capital (₹) :", value=1000000.0, step=100000.0)
+        initial_cap = st.number_input("Initial Backtest Capital (₹) :", value=100000.0, step=10000.0)
     with bt_c2:
         start_d = st.date_input("Start Date :", value=datetime.now() - timedelta(days=365*3))
     with bt_c3:
