@@ -6,6 +6,8 @@ import requests
 from io import StringIO
 from datetime import datetime, timedelta
 
+from kite_auth import get_authenticated_kite, AutoLoginError
+
 # ==========================================
 # PAGE CONFIGURATION & STYLING
 # ==========================================
@@ -87,6 +89,68 @@ def fetch_market_data(tickers, period="5y"):
     return prices
 
 # ==========================================
+# ZERODHA KITE CONNECT - LIVE PRICE OVERLAY
+# ==========================================
+@st.cache_resource(ttl=60 * 60 * 20)  # re-authenticate roughly once a trading day
+def get_kite_client():
+    """Logs into Kite automatically using credentials from Streamlit Secrets.
+    Raises AutoLoginError if Zerodha blocks the automated login (e.g. a CAPTCHA
+    challenge) -- see kite_auth.py for what that means and why it can happen."""
+    return get_authenticated_kite(
+        api_key=st.secrets["KITE_API_KEY"],
+        api_secret=st.secrets["KITE_API_SECRET"],
+        user_id=st.secrets["KITE_USER_ID"],
+        password=st.secrets["KITE_PASSWORD"],
+        totp_secret=st.secrets["KITE_TOTP_SECRET"],
+    )
+
+
+def get_live_prices(yf_tickers):
+    """Returns {yf_ticker: live_last_traded_price} for tickers like 'RELIANCE.NS',
+    fetched in a single batched call. Returns {} (never raises) if Kite isn't
+    reachable right now -- callers should fall back to cached Yahoo data."""
+    yf_tickers = [t for t in dict.fromkeys(yf_tickers) if t and not t.startswith("^")]
+    if not yf_tickers:
+        return {}
+    try:
+        kite = get_kite_client()
+    except AutoLoginError as e:
+        st.session_state["_kite_status"] = f"unavailable today ({e})"
+        return {}
+    except Exception:
+        st.session_state["_kite_status"] = "not configured"
+        return {}
+
+    kite_symbols = {t: "NSE:" + t.replace(".NS", "") for t in yf_tickers}
+    try:
+        quotes = kite.ltp(list(kite_symbols.values()))
+    except Exception as e:
+        st.session_state["_kite_status"] = f"request failed ({e})"
+        return {}
+
+    st.session_state["_kite_status"] = "live"
+    return {
+        ticker: quotes[sym]["last_price"]
+        for ticker, sym in kite_symbols.items()
+        if sym in quotes
+    }
+
+
+def apply_live_price_overlay(prices_df, tickers):
+    """Best available current price per ticker: a live Kite LTP quote where
+    possible, else the latest cached Yahoo Finance close. Returns a plain dict."""
+    live_prices = get_live_prices(tickers)
+    result = {}
+    for t in tickers:
+        if t in live_prices:
+            result[t] = float(live_prices[t])
+        elif not prices_df.empty and t in prices_df.columns:
+            series = prices_df[t].dropna()
+            if not series.empty:
+                result[t] = float(series.iloc[-1])
+    return result
+
+# ==========================================
 # STATE INITIALIZATION
 # ==========================================
 if "navigation_tab" not in st.session_state:
@@ -149,14 +213,15 @@ def calculate_strategy_metrics(strat):
     if positions and strat["status"] == "Active":
         tickers = [p["Symbol"] for p in positions]
         prices_df = fetch_market_data(tickers, period="1mo")
+        live_or_close = apply_live_price_overlay(prices_df, tickers)
         
         for pos in positions:
             sym = pos["Symbol"]
             buy_qty = pos["Buy Qty"]
             buy_price = pos["Buy Price"]
             
-            # Fetch latest adjusted close
-            cmp_price = float(prices_df[sym].dropna().iloc[-1]) if (not prices_df.empty and sym in prices_df.columns) else buy_price
+            # Live Kite LTP when available, else latest cached Yahoo close
+            cmp_price = live_or_close.get(sym, buy_price)
             
             cost_val = buy_price * buy_qty
             curr_val = cmp_price * buy_qty
@@ -196,7 +261,7 @@ def calculate_strategy_metrics(strat):
         "positions_data": positions_data
     }
 
-def run_strategy_stock_scanner(strat, price_subset=None):
+def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
     
     if price_subset is None:
@@ -253,12 +318,27 @@ def run_strategy_stock_scanner(strat, price_subset=None):
             returns = (filtered_df.iloc[-1] / filtered_df.iloc[-p - 1] - 1).dropna()
             rank_components.append(returns.rank(ascending=False, method="min"))
 
+    entry_n = strat.get("entry_rank", 10)
+
     if not rank_components:
-        return list(filtered_df.columns[:strat.get("entry_rank", 10)])
+        return list(filtered_df.columns[:entry_n])
 
     composite_rank = pd.concat(rank_components, axis=1).mul(weights, axis=1).sum(axis=1).sort_values()
-    target_count = strat.get("entry_rank", 10)
-    return list(composite_rank.index[:target_count])
+
+    # --- Buffer-based selection: a held stock is kept as long as it's still  ---
+    # --- inside exit_rank; only names that fall outside exit_rank get sold,  ---
+    # --- and new names only ever enter from inside entry_rank. This is the   ---
+    # --- "buffer for exit" behavior -- previously entry_rank was the only    ---
+    # --- thing used, so exit_rank had no effect on which stocks were picked. ---
+    ordinal_rank = pd.Series(range(1, len(composite_rank) + 1), index=composite_rank.index)
+    exit_n = max(strat.get("exit_rank", entry_n), entry_n)
+    held = set(current_holdings or [])
+
+    retained = [s for s in ordinal_rank.index if s in held and ordinal_rank[s] <= exit_n]
+    slots_needed = max(entry_n - len(retained), 0)
+    new_entries = [s for s in ordinal_rank.index if s not in retained][:slots_needed]
+
+    return retained + new_entries
 
 def run_backtest_simulation(strat_config, initial_capital, start_date, end_date):
     groups = strat_config.get("groups", ["Nifty 500"])
@@ -287,7 +367,9 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date)
         if len(historical_sub_df) < 252:
             continue
 
-        selected_stocks = run_strategy_stock_scanner(strat_config, price_subset=historical_sub_df)
+        selected_stocks = run_strategy_stock_scanner(
+            strat_config, price_subset=historical_sub_df, current_holdings=list(current_holdings.keys())
+        )
         
         total_val = current_cash
         for sym, qty in current_holdings.items():
@@ -372,6 +454,12 @@ if st.session_state.navigation_tab == "DASHBOARD":
         status_class = "status-active" if strat["status"] == "Active" else "status-paused"
         st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | **Rebalance in:** {days_left} Days", unsafe_allow_html=True)
 
+        kite_status = st.session_state.get("_kite_status")
+        if kite_status == "live":
+            st.caption("🟢 Prices below are live from Zerodha Kite where available.")
+        elif kite_status:
+            st.caption(f"🟡 Kite live prices {kite_status} — showing Yahoo Finance closes instead.")
+
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Allocated Capital", f"₹{metrics['allocated']:,.2f}")
         m2.metric("Uninvested Cash", f"₹{metrics['cash_reserve']:,.2f}")
@@ -387,7 +475,8 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         if run_scan:
             with st.spinner("Executing strategy parameters against selected asset groups..."):
-                scanned_tickers = run_strategy_stock_scanner(strat)
+                current_symbols = [p["Symbol"] for p in strat.get("positions", [])]
+                scanned_tickers = run_strategy_stock_scanner(strat, current_holdings=current_symbols)
                 st.session_state[f"scanned_results_{strat_name}"] = scanned_tickers
 
         scanned_results = st.session_state.get(f"scanned_results_{strat_name}", None)
@@ -406,39 +495,63 @@ if st.session_state.navigation_tab == "DASHBOARD":
             with sc_col2:
                 st.markdown("#### 🔄 Updated / Scanned Portfolio Stocks")
                 prices_df = fetch_market_data(scanned_results, period="5d")
+                live_or_close = apply_live_price_overlay(prices_df, scanned_results)
+                held_symbols = {p["Symbol"] for p in strat.get("positions", [])}
                 scanned_rows = []
                 for ticker in scanned_results:
-                    cmp = float(prices_df[ticker].dropna().iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 0.0
+                    cmp = live_or_close.get(ticker, 0.0)
                     scanned_rows.append({
                         "Symbol": ticker.replace(".NS", ""),
                         "CMP": f"₹{cmp:,.2f}",
-                        "Status": "Entry Target"
+                        "Status": "Held (in buffer)" if ticker in held_symbols else "Entry Target"
                     })
                 st.dataframe(pd.DataFrame(scanned_rows), use_container_width=True)
 
             if st.button("⚡ Execute Rebalance & Reinvest Capital", type="primary", use_container_width=True):
-                reinvest_pool = metrics["current_total_value"] * strat.get("allocation_multiplier", 1.0)
-                per_stock_alloc = reinvest_pool / len(scanned_results) if scanned_results else 0.0
-                
-                prices_df = fetch_market_data(scanned_results, period="5d")
-                new_positions = []
-                
-                for ticker in scanned_results:
-                    cmp = float(prices_df[ticker].dropna().iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 1.0
-                    qty = int(per_stock_alloc // cmp) if cmp > 0 else 0
-                    
+                existing_positions = {p["Symbol"]: p for p in strat.get("positions", [])}
+                retained_symbols = [s for s in scanned_results if s in existing_positions]
+                new_symbols = [s for s in scanned_results if s not in existing_positions]
+                exited_symbols = [s for s in existing_positions if s not in scanned_results]
+
+                price_lookup_df = fetch_market_data(scanned_results + exited_symbols, period="5d")
+                live_or_close = apply_live_price_overlay(price_lookup_df, scanned_results + exited_symbols)
+
+                # Exited positions realize their P&L and free up cash; retained
+                # positions are left completely untouched (no simulated sell/rebuy)
+                freed_cash = 0.0
+                newly_realized = 0.0
+                for sym in exited_symbols:
+                    pos = existing_positions[sym]
+                    exit_price = live_or_close.get(sym, pos["Buy Price"])
+                    proceeds = exit_price * pos["Buy Qty"]
+                    freed_cash += proceeds
+                    newly_realized += proceeds - (pos["Buy Price"] * pos["Buy Qty"])
+
+                new_positions = [existing_positions[s] for s in retained_symbols]
+
+                investable_for_new = (metrics["cash_reserve"] + freed_cash) * strat.get("allocation_multiplier", 1.0)
+                per_new_alloc = investable_for_new / len(new_symbols) if new_symbols else 0.0
+
+                for ticker in new_symbols:
+                    cmp = live_or_close.get(ticker)
+                    if not cmp or cmp <= 0:
+                        continue
+                    qty = int(per_new_alloc // cmp)
                     if qty > 0:
                         new_positions.append({
                             "Symbol": ticker,
                             "Buy Qty": qty,
-                            "Buy Price": cmp,  # Synchronized with current market close
+                            "Buy Price": cmp,
                             "Entry Date": datetime.now().strftime("%Y-%m-%d")
                         })
 
                 strat["positions"] = new_positions
-                strat["realized_pnl"] = metrics["total_pnl"]
+                strat["realized_pnl"] = strat.get("realized_pnl", 0.0) + newly_realized
                 st.session_state[f"scanned_results_{strat_name}"] = None
-                st.success(f"Rebalanced! Reinvested effective amount of ₹{reinvest_pool:,.2f} ({strat.get('allocation_multiplier', 1.0)}x multiplier) across {len(new_positions)} assets.")
+                st.success(
+                    f"Rebalanced '{strat_name}': kept {len(retained_symbols)} in the buffer, "
+                    f"exited {len(exited_symbols)}, entered {len(new_symbols)} new."
+                )
                 st.rerun()
 
         else:
@@ -572,7 +685,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     with rank_c1:
         entry_rank = st.number_input("Entry Rank Stocks (Top N Target) :", value=int(edit_strat.get("entry_rank", 10)), min_value=1, max_value=50)
     with rank_c2:
-        exit_rank = st.number_input("Exit Rank Threshold :", value=int(edit_strat.get("exit_rank", 20)), min_value=1, max_value=100)
+        exit_rank = st.number_input("Exit Rank Threshold :", value=int(edit_strat.get("exit_rank", 20)), min_value=1, max_value=100, help="A held stock is only sold once it ranks worse than this. Keep it >= Entry Rank for a buffer effect; equal to Entry Rank means no buffer.")
 
     st.markdown("---")
     st.markdown("#### Technical Features & Indicator Rules")
