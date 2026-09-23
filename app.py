@@ -8,6 +8,11 @@ import requests
 import streamlit as st
 import yfinance as yf
 
+from kite_data import (
+    fetch_market_data,
+    get_data_provider_status,
+)
+
 # ==========================================
 # PAGE CONFIGURATION & STYLING
 # ==========================================
