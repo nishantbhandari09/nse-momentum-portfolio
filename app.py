@@ -1,816 +1,287 @@
-import streamlit as st
-import pandas as pd
+import io
 import numpy as np
-import yfinance as yf
+import pandas as pd
 import requests
-from io import StringIO
-from datetime import datetime, timedelta
+import streamlit as st
+import yfinance as yf
 
-from kite_auth import get_authenticated_kite, AutoLoginError
+# -----------------------------------------------------------------------------
+# APP CONFIGURATION
+# -----------------------------------------------------------------------------
+st.set_page_config(
+    page_title="NSE Momentum Portfolio & Backtest Studio",
+    page_icon="📈",
+    layout="wide",
+)
 
-# ==========================================
-# PAGE CONFIGURATION & STYLING
-# ==========================================
-st.set_page_config(page_title="Quantitative Strategy Engine & Backtest Studio", layout="wide")
+DATA_URL_PARQUET = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.parquet"
+DATA_URL_CSV = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.csv.gz"
 
-st.markdown("""
-    <style>
-    .main { background-color: #F4F7FE; }
-    .stMetric { background-color: #FFFFFF; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .status-active { color: #00875A; font-weight: bold; background-color: #E3FCEF; padding: 2px 8px; border-radius: 4px; }
-    .status-paused { color: #DE350B; font-weight: bold; background-color: #FFEBE6; padding: 2px 8px; border-radius: 4px; }
-    </style>
-""", unsafe_allow_html=True)
-
-ASSET_GROUPS_MAPPING = {
-    "Gold ETF": ["GOLDBEES.NS"],
-    "LiquidBEES": ["LIQUIDCASE.NS"],
-    "Gov Bond": ["SETFGSEC.NS"],
-    "All ETFs": ["GOLDBEES.NS", "LIQUIDCASE.NS", "SETFGSEC.NS", "NIFTYBEES.NS", "JUNIORBEES.NS", "BANKBEES.NS"]
-}
-
-NIFTY_REGIME_TICKER = "^CRSLDX"
-GSEC_REGIME_TICKER = "SETFGSEC.NS"
-
-# ==========================================
-# DATA FETCHING ENGINE
-# ==========================================
+# -----------------------------------------------------------------------------
+# 1. DATA LAYER (Release Data + Fallback)
+# -----------------------------------------------------------------------------
 @st.cache_data(ttl=86400)
-def get_trusted_tickers_by_group(groups):
-    tickers = []
-    
-    if "Nifty 500" in groups or "Nifty 200" in groups:
-        official_nse_url = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-        try:
-            response = session.get(official_nse_url, timeout=10)
-            if response.status_code == 200:
-                df = pd.read_csv(StringIO(response.text))
-                if "Symbol" in df.columns:
-                    n500 = [f"{str(sym).strip()}.NS" for sym in df["Symbol"].dropna().unique()]
-                    if "Nifty 200" in groups and "Nifty 500" not in groups:
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
-        except Exception:
-            github_mirror_url = "https://raw.githubusercontent.com/indian-stock-market/nifty-500-constituents/main/nifty500.csv"
-            try:
-                df_mirror = pd.read_csv(github_mirror_url)
-                if "Symbol" in df_mirror.columns:
-                    n500 = [f"{str(sym).strip()}.NS" for sym in df_mirror["Symbol"].dropna().unique()]
-                    if "Nifty 200" in groups and "Nifty 500" not in groups:
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
-            except Exception:
-                tickers.extend(["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "SBIN.NS"])
-
-    for grp in groups:
-        if grp in ASSET_GROUPS_MAPPING:
-            tickers.extend(ASSET_GROUPS_MAPPING[grp])
-
-    if not tickers:
-        tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
-
-    return list(set(tickers))
-
-@st.cache_data(ttl=3600)
-def fetch_market_data(tickers, period="5y"):
-    all_tickers = list(set(tickers + ASSET_GROUPS_MAPPING["All ETFs"] + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
-    data = yf.download(tickers=all_tickers, period=period, interval="1d", auto_adjust=True, progress=False)
-    
-    if isinstance(data.columns, pd.MultiIndex):
-        prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
-    else:
-        prices = data
-        
-    prices = prices.dropna(thresh=int(len(prices)*0.7), axis=1).ffill().bfill()
-    return prices
-
-# ==========================================
-# ZERODHA KITE CONNECT - LIVE PRICE OVERLAY
-# ==========================================
-@st.cache_resource(ttl=60 * 60 * 20)  # re-authenticate roughly once a trading day
-def get_kite_client():
-    """Logs into Kite automatically using credentials from Streamlit Secrets.
-    Raises AutoLoginError if Zerodha blocks the automated login (e.g. a CAPTCHA
-    challenge) -- see kite_auth.py for what that means and why it can happen."""
-    return get_authenticated_kite(
-        api_key=st.secrets["KITE_API_KEY"],
-        api_secret=st.secrets["KITE_API_SECRET"],
-        user_id=st.secrets["KITE_USER_ID"],
-        password=st.secrets["KITE_PASSWORD"],
-        totp_secret=st.secrets["KITE_TOTP_SECRET"],
-    )
-
-
-def get_live_prices(yf_tickers):
-    """Returns {yf_ticker: live_last_traded_price} for tickers like 'RELIANCE.NS',
-    fetched in a single batched call. Returns {} (never raises) if Kite isn't
-    reachable right now -- callers should fall back to cached Yahoo data."""
-    yf_tickers = [t for t in dict.fromkeys(yf_tickers) if t and not t.startswith("^")]
-    if not yf_tickers:
-        return {}
+def load_historical_dataset():
+    """Fetches clean point-in-time dataset from release storage or falls back to yfinance."""
     try:
-        kite = get_kite_client()
-    except AutoLoginError as e:
-        st.session_state["_kite_status"] = f"unavailable today ({e})"
-        return {}
+        df = pd.read_parquet(DATA_URL_PARQUET)
+        df.index = pd.to_datetime(df.index)
+        return df
     except Exception:
-        st.session_state["_kite_status"] = "not configured"
-        return {}
+        try:
+            df = pd.read_csv(DATA_URL_CSV, compression="gzip", index_col=0, parse_dates=True)
+            return df
+        except Exception:
+            # Fallback to yfinance if release assets are unreachable
+            benchmark = yf.download("^NSEI", period="5y", progress=False)["Close"]
+            return pd.DataFrame({"^NSEI": benchmark})
 
-    kite_symbols = {t: "NSE:" + t.replace(".NS", "") for t in yf_tickers}
-    try:
-        quotes = kite.ltp(list(kite_symbols.values()))
-    except Exception as e:
-        st.session_state["_kite_status"] = f"request failed ({e})"
-        return {}
+@st.cache_data(ttl=86400)
+def fetch_ticker_data(tickers, start_date, end_date):
+    """Downloads prices via yfinance if ticker missing from offline dataset."""
+    data = yf.download(tickers, start=start_date, end=end_date, progress=False)["Close"]
+    return data
 
-    st.session_state["_kite_status"] = "live"
-    return {
-        ticker: quotes[sym]["last_price"]
-        for ticker, sym in kite_symbols.items()
-        if sym in quotes
-    }
+# -----------------------------------------------------------------------------
+# 2. OPTIONAL SIGNAL LAYER
+# -----------------------------------------------------------------------------
+def calculate_simple_momentum(price_df, lookback_days=126):
+    """Simple trailing percentage return."""
+    if len(price_df) < lookback_days:
+        return pd.Series(dtype=float)
+    returns = (price_df.iloc[-1] / price_df.iloc[-lookback_days]) - 1.0
+    return returns
 
+def calculate_volatility_adjusted_momentum(price_df, lookback_days=126):
+    """Volatility-Adjusted Momentum: (Return / Volatility) * R^2."""
+    if len(price_df) < lookback_days:
+        return pd.Series(dtype=float)
 
-def apply_live_price_overlay(prices_df, tickers):
-    """Best available current price per ticker: a live Kite LTP quote where
-    possible, else the latest cached Yahoo Finance close. Returns a plain dict."""
-    live_prices = get_live_prices(tickers)
-    result = {}
-    for t in tickers:
-        if t in live_prices:
-            result[t] = float(live_prices[t])
-        elif not prices_df.empty and t in prices_df.columns:
-            series = prices_df[t].dropna()
-            if not series.empty:
-                result[t] = float(series.iloc[-1])
-    return result
+    subset = price_df.tail(lookback_days)
+    daily_returns = subset.pct_change().dropna()
+    total_return = (subset.iloc[-1] / subset.iloc[0]) - 1.0
+    annualized_vol = daily_returns.std() * np.sqrt(252)
 
-# ==========================================
-# STATE INITIALIZATION
-# ==========================================
-if "navigation_tab" not in st.session_state:
-    st.session_state.navigation_tab = "DASHBOARD"
+    # Calculate exponential trend fitting (R^2)
+    scores = {}
+    x = np.arange(len(subset))
+    for col in subset.columns:
+        y = np.log(subset[col].values)
+        if np.isnan(y).any() or annualized_vol[col] == 0:
+            scores[col] = 0.0
+            continue
+        corr = np.corrcoef(x, y)[0, 1]
+        r_squared = corr ** 2 if not np.isnan(corr) else 0.0
+        scores[col] = (total_return[col] / annualized_vol[col]) * r_squared
 
-if "active_strategy_view" not in st.session_state:
-    st.session_state.active_strategy_view = None
+    return pd.Series(scores)
 
-if "editing_strategy_name" not in st.session_state:
-    st.session_state.editing_strategy_name = None
-
-if "strategies" not in st.session_state:
-    st.session_state.strategies = {
-        "Alpha Momentum Multiplier": {
-            "created_date": (datetime.now() - timedelta(days=43)).strftime("%Y-%m-%d"),
-            "status": "Active",
-            "type": "Real",
-            "allocated": 100000.0,
-            "realized_pnl": 0.0,
-            "rebalance_freq": "Monthly",
-            "rebalance_day": 1,
-            "groups": ["Nifty 500", "Gold ETF"],
-            "allocation_multiplier": 1.0,
-            "entry_rank": 10,
-            "exit_rank": 20,
-            "period_days": [252, 120, 60],
-            "period_weights": [0.5, 0.3, 0.2],
-            "pct_from_high": 15.0,
-            "pct_from_low": 0.0,
-            "moving_average": "200 EMA",
-            "use_rs": True,
-            "rs_benchmark": "Nifty 500 / G-Sec",
-            "positions": []
-        }
-    }
-
-# ==========================================
-# METRICS & CALCULATIONS ENGINE
-# ==========================================
-def calculate_days_to_rebalance(rebalance_day):
-    today = datetime.now()
-    target_date = datetime(today.year, today.month, min(rebalance_day, 28))
-    if target_date < today:
-        if today.month == 12:
-            target_date = datetime(today.year + 1, 1, min(rebalance_day, 28))
-        else:
-            target_date = datetime(today.year, today.month + 1, min(rebalance_day, 28))
-    return (target_date - today).days
-
-def calculate_strategy_metrics(strat):
-    positions = strat.get("positions", [])
-    realized_pnl = strat.get("realized_pnl", 0.0)
-    allocated = strat["allocated"]
-    
-    unrealized_pnl = 0.0
-    current_holding_val = 0.0
-    total_cost_basis = 0.0
-    positions_data = []
-
-    if positions and strat["status"] == "Active":
-        tickers = [p["Symbol"] for p in positions]
-        prices_df = fetch_market_data(tickers, period="1mo")
-        live_or_close = apply_live_price_overlay(prices_df, tickers)
-        
-        for pos in positions:
-            sym = pos["Symbol"]
-            buy_qty = pos["Buy Qty"]
-            buy_price = pos["Buy Price"]
-            
-            # Live Kite LTP when available, else latest cached Yahoo close
-            cmp_price = live_or_close.get(sym, buy_price)
-            
-            cost_val = buy_price * buy_qty
-            curr_val = cmp_price * buy_qty
-            pos_unrealized = curr_val - cost_val
-            pos_pnl_pct = ((cmp_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
-            
-            total_cost_basis += cost_val
-            unrealized_pnl += pos_unrealized
-            current_holding_val += curr_val
-
-            positions_data.append({
-                "Symbol": sym.replace(".NS", ""),
-                "Buy Qty": buy_qty,
-                "Buy Price": f"₹{buy_price:,.2f}",
-                "Entry Date": pos["Entry Date"],
-                "CMP": f"₹{cmp_price:,.2f}",
-                "Current Value": f"₹{curr_val:,.2f}",
-                "Current P&L": f"₹{pos_unrealized:,.2f}",
-                "Current P&L %": f"{pos_pnl_pct:.2f}%"
-            })
-
-    # Account for remaining uninvested cash buffer
-    cash_reserve = max(0.0, allocated - total_cost_basis) if total_cost_basis > 0 else allocated
-    total_pnl = realized_pnl + unrealized_pnl
-    returns_pct = (total_pnl / allocated * 100) if allocated > 0 else 0.0
-    current_total_value = cash_reserve + current_holding_val + realized_pnl
-
-    return {
-        "allocated": allocated,
-        "cash_reserve": cash_reserve,
-        "current_holding_val": current_holding_val,
-        "realized_pnl": realized_pnl,
-        "unrealized_pnl": unrealized_pnl,
-        "total_pnl": total_pnl,
-        "returns_pct": returns_pct,
-        "current_total_value": current_total_value,
-        "positions_data": positions_data
-    }
-
-def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None):
-    selected_groups = strat.get("groups", ["Nifty 500"])
-    
-    if price_subset is None:
-        group_tickers = get_trusted_tickers_by_group(selected_groups)
-        prices_df = fetch_market_data(group_tickers, period="2y")
+def get_momentum_scores(price_df, signal_type="Simple Momentum", lookback_days=126):
+    """Routes score calculation based on user selection in Signal Layer."""
+    if signal_type == "Volatility-Adjusted Momentum":
+        return calculate_volatility_adjusted_momentum(price_df, lookback_days)
     else:
-        prices_df = price_subset
+        return calculate_simple_momentum(price_df, lookback_days)
 
-    if prices_df.empty:
-        return []
+# -----------------------------------------------------------------------------
+# 3. OPTIONAL EXECUTION LAYER & REGIME FILTERS
+# -----------------------------------------------------------------------------
+def is_regime_bullish(benchmark_series, current_date, sma_period=200):
+    """Check if benchmark price is above its 200 SMA."""
+    sub = benchmark_series.loc[:current_date].dropna()
+    if len(sub) < sma_period:
+        return True
+    current_val = sub.iloc[-1]
+    sma_val = sub.tail(sma_period).mean()
+    return current_val >= sma_val
 
-    latest_prices = prices_df.iloc[-1]
-    filtered_df = prices_df.copy()
+def apply_rank_buffering(current_holdings, ranked_candidates, target_portfolio_size, buffer_rank):
+    """Keeps existing stock holdings if they haven't dropped past the buffer rank."""
+    new_portfolio = []
 
-    # Moving Average Filter
-    ma_config = strat.get("moving_average", "200 EMA")
-    if ma_config != "None":
-        period = 200 if "200" in ma_config else (100 if "100" in ma_config else 50)
-        is_ema = "EMA" in ma_config
-        if is_ema:
-            ma_vals = prices_df.ewm(span=period, adjust=False).mean().iloc[-1]
-        else:
-            ma_vals = prices_df.rolling(window=period).mean().iloc[-1]
-        filtered_df = filtered_df.loc[:, latest_prices > ma_vals]
+    # 1. Retain existing holdings inside buffer rank limit
+    for stock in current_holdings:
+        if stock in ranked_candidates:
+            stock_rank = ranked_candidates.index(stock) + 1  # 1-indexed
+            if stock_rank <= buffer_rank and len(new_portfolio) < target_portfolio_size:
+                new_portfolio.append(stock)
 
-    # Period High/Low Proximity Filter
-    pct_high = strat.get("pct_from_high", 15.0)
-    if pct_high > 0 and len(filtered_df) >= 252:
-        period_high = filtered_df.iloc[-252:].max()
-        pct_diff = ((period_high - latest_prices) / period_high) * 100
-        filtered_df = filtered_df.loc[:, pct_diff <= pct_high]
+    # 2. Fill remaining slots with top unheld ranked candidates
+    for stock in ranked_candidates:
+        if len(new_portfolio) >= target_portfolio_size:
+            break
+        if stock not in new_portfolio:
+            new_portfolio.append(stock)
 
-    # Relative Strength (RS) Ratio Filter
-    if strat.get("use_rs", True):
-        if NIFTY_REGIME_TICKER in prices_df.columns and GSEC_REGIME_TICKER in prices_df.columns:
-            rs_ratio = prices_df[NIFTY_REGIME_TICKER] / prices_df[GSEC_REGIME_TICKER]
-            rs_sma = rs_ratio.rolling(window=50).mean()
-            if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
-                return [ASSET_GROUPS_MAPPING["Gov Bond"][0]]
+    return new_portfolio
 
-    # Composite Ranking
-    periods = strat.get("period_days", [252, 120, 60])
-    weights = strat.get("period_weights", [0.5, 0.3, 0.2])
-    
-    if len(weights) < len(periods):
-        weights = [1.0 / len(periods)] * len(periods)
-    
-    weights = np.array(weights[:len(periods)], dtype=float)
-    weights /= weights.sum()
-
-    rank_components = []
-    for p in periods:
-        if len(filtered_df) > p:
-            returns = (filtered_df.iloc[-1] / filtered_df.iloc[-p - 1] - 1).dropna()
-            rank_components.append(returns.rank(ascending=False, method="min"))
-
-    entry_n = strat.get("entry_rank", 10)
-
-    if not rank_components:
-        return list(filtered_df.columns[:entry_n])
-
-    composite_rank = pd.concat(rank_components, axis=1).mul(weights, axis=1).sum(axis=1).sort_values()
-
-    # --- Buffer-based selection: a held stock is kept as long as it's still  ---
-    # --- inside exit_rank; only names that fall outside exit_rank get sold,  ---
-    # --- and new names only ever enter from inside entry_rank. This is the   ---
-    # --- "buffer for exit" behavior -- previously entry_rank was the only    ---
-    # --- thing used, so exit_rank had no effect on which stocks were picked. ---
-    ordinal_rank = pd.Series(range(1, len(composite_rank) + 1), index=composite_rank.index)
-    exit_n = max(strat.get("exit_rank", entry_n), entry_n)
-    held = set(current_holdings or [])
-
-    retained = [s for s in ordinal_rank.index if s in held and ordinal_rank[s] <= exit_n]
-    slots_needed = max(entry_n - len(retained), 0)
-    new_entries = [s for s in ordinal_rank.index if s not in retained][:slots_needed]
-
-    return retained + new_entries
-
-def run_backtest_simulation(strat_config, initial_capital, start_date, end_date):
-    groups = strat_config.get("groups", ["Nifty 500"])
-    tickers = get_trusted_tickers_by_group(groups)
-    prices_df = fetch_market_data(tickers, period="5y")
-    
-    prices_df = prices_df.loc[start_date:end_date]
-    if len(prices_df) < 252:
+# -----------------------------------------------------------------------------
+# 4. BACKTEST ENGINE
+# -----------------------------------------------------------------------------
+def run_backtest_simulation(
+    price_df,
+    benchmark_series,
+    start_date,
+    end_date,
+    initial_capital=100000.0,
+    top_n=10,
+    signal_type="Simple Momentum",
+    use_regime_filter=True,
+    use_rank_buffer=True,
+    buffer_threshold=20,
+    allocation_multiplier=1.0,
+):
+    sub_prices = price_df.loc[start_date:end_date].copy()
+    if len(sub_prices) < 252:
         return None
 
-    # Fixed resample alias from 'M' to 'ME' (Month End) or 'MS' (Month Start)
+    # Resample using updated Pandas 'ME' (Month End) frequency
     try:
-        rebalance_dates = prices_df.resample('ME').first().index
+        rebalance_dates = sub_prices.resample("ME").first().index
     except ValueError:
-        rebalance_dates = prices_df.resample('MS').first().index
+        rebalance_dates = sub_prices.resample("MS").first().index
 
     portfolio_history = []
     current_cash = initial_capital
     current_holdings = {}
-    multiplier = strat_config.get("allocation_multiplier", 1.0)
 
     for i in range(len(rebalance_dates) - 1):
         dt = rebalance_dates[i]
-        historical_sub_df = prices_df.loc[:dt]
-        
-        if len(historical_sub_df) < 252:
+        hist_df = sub_prices.loc[:dt]
+        if len(hist_df) < 126:
             continue
 
-        selected_stocks = run_strategy_stock_scanner(
-            strat_config, price_subset=historical_sub_df, current_holdings=list(current_holdings.keys())
-        )
-        
+        # Check Market Regime Filter (Optional Execution Layer)
+        regime_ok = True
+        if use_regime_filter and benchmark_series is not None:
+            regime_ok = is_regime_bullish(benchmark_series, dt, sma_period=200)
+
+        # Mark-to-market valuation
         total_val = current_cash
         for sym, qty in current_holdings.items():
-            if sym in historical_sub_df.columns:
-                total_val += qty * historical_sub_df[sym].iloc[-1]
+            if sym in hist_df.columns and not np.isnan(hist_df[sym].iloc[-1]):
+                total_val += qty * hist_df[sym].iloc[-1]
 
-        if selected_stocks:
-            effective_pool = total_val * multiplier
-            alloc_per_stock = effective_pool / len(selected_stocks)
+        # Calculate momentum signals (Optional Signal Layer)
+        scores = get_momentum_scores(hist_df, signal_type=signal_type, lookback_days=126)
+        ranked_stocks = scores.sort_values(ascending=False).dropna().index.tolist()
+
+        if not regime_ok:
+            # Move 100% to cash during bearish market regimes
             current_holdings = {}
-            current_cash = total_val  # Reset cash pool
+            current_cash = total_val
+        else:
+            # Apply Rank Buffer Rule (Optional Execution Layer)
+            if use_rank_buffer and current_holdings:
+                target_stocks = apply_rank_buffering(
+                    list(current_holdings.keys()), ranked_stocks, top_n, buffer_threshold
+                )
+            else:
+                target_stocks = ranked_stocks[:top_n]
 
-            for sym in selected_stocks:
-                if sym in historical_sub_df.columns:
-                    stk_price = historical_sub_df[sym].iloc[-1]
-                    if stk_price > 0:
-                        qty = int(alloc_per_stock // stk_price)
-                        if qty > 0:
-                            current_holdings[sym] = qty
-                            current_cash -= (qty * stk_price)
+            # Portfolio Allocation logic
+            if target_stocks:
+                effective_pool = total_val * allocation_multiplier
+                alloc_per_stock = effective_pool / len(target_stocks)
+                current_holdings = {}
+                current_cash = total_val
+
+                for sym in target_stocks:
+                    if sym in hist_df.columns:
+                        stk_price = hist_df[sym].iloc[-1]
+                        if stk_price > 0:
+                            qty = int(alloc_per_stock // stk_price)
+                            if qty > 0:
+                                current_holdings[sym] = qty
+                                current_cash -= qty * stk_price
 
         portfolio_history.append({"Date": dt, "Portfolio Value": total_val})
 
     if not portfolio_history:
         return None
 
-    df_res = pd.DataFrame(portfolio_history).set_index("Date")
-    return df_res
+    res_df = pd.DataFrame(portfolio_history).set_index("Date")
+    return res_df
 
-# ==========================================
-# NAVIGATION HEADER
-# ==========================================
-nav_col1, nav_col2, nav_col3, _ = st.columns([1.5, 2, 1.5, 3])
-with nav_col1:
-    if st.button("💻 DASHBOARD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DASHBOARD" else "secondary"):
-        st.session_state.navigation_tab = "DASHBOARD"
-        st.session_state.active_strategy_view = None
-        st.rerun()
+# -----------------------------------------------------------------------------
+# 5. STREAMLIT UI LAYOUT & SIDEBAR OPTIONS
+# -----------------------------------------------------------------------------
+st.title("📈 Backtest Studio — Momentum Strategy")
+st.caption("Simulate historical performance with flexible signal modes and execution filters.")
 
-with nav_col2:
-    if st.button("➕ INVESTING STRATEGY", use_container_width=True, type="primary" if st.session_state.navigation_tab == "STRATEGY_BUILDER" else "secondary"):
-        st.session_state.navigation_tab = "STRATEGY_BUILDER"
-        st.session_state.editing_strategy_name = None
-        st.rerun()
+# Sidebar Configuration
+st.sidebar.header("⚙️ General Settings")
+initial_cap = st.sidebar.number_input("Initial Capital (₹)", value=100000, step=10000)
+top_n = st.sidebar.slider("Number of Top Holdings", min_value=5, max_value=30, value=10)
 
-with nav_col3:
-    if st.button("📈 BACKTEST ENGINE", use_container_width=True, type="primary" if st.session_state.navigation_tab == "BACKTEST" else "secondary"):
-        st.session_state.navigation_tab = "BACKTEST"
-        st.rerun()
+st.sidebar.markdown("---")
+st.sidebar.header("🧠 1. Signal Layer (Optional)")
+signal_type = st.sidebar.selectbox(
+    "Choose Momentum Model",
+    options=["Simple Momentum", "Volatility-Adjusted Momentum"],
+    help="Select how stocks are ranked.",
+)
 
-st.markdown("---")
+st.sidebar.markdown("---")
+st.sidebar.header("🛡️ 2. Execution Layer (Optional)")
+use_regime_filter = st.sidebar.checkbox(
+    "Enable Market Regime Filter (200 SMA)",
+    value=True,
+    help="Move portfolio to cash when Nifty is below its 200-day moving average.",
+)
 
-# ==========================================
-# PAGE 1: PORTFOLIO DASHBOARD & DRILL-DOWN
-# ==========================================
-if st.session_state.navigation_tab == "DASHBOARD":
-    
-    if st.session_state.active_strategy_view is not None:
-        strat_name = st.session_state.active_strategy_view
-        strat = st.session_state.strategies.get(strat_name)
-        
-        if not strat:
-            st.session_state.active_strategy_view = None
-            st.rerun()
+use_rank_buffer = st.sidebar.checkbox(
+    "Enable Rank Buffer Rule (Reduce Churn)",
+    value=True,
+    help="Avoid selling existing holdings unless their rank falls below the buffer threshold.",
+)
 
-        metrics = calculate_strategy_metrics(strat)
-        days_left = calculate_days_to_rebalance(strat.get("rebalance_day", 1))
+buffer_threshold = 20
+if use_rank_buffer:
+    buffer_threshold = st.sidebar.number_input(
+        "Buffer Rank Exit Cutoff", min_value=top_n, max_value=100, value=20
+    )
 
-        top_col1, top_col2, top_col3 = st.columns([2, 5, 3])
-        with top_col1:
-            if st.button("❮ Back to Dashboard"):
-                st.session_state.active_strategy_view = None
-                st.rerun()
-        with top_col3:
-            current_status = strat["status"]
-            btn_label = "⏸️ Pause Strategy" if current_status == "Active" else "▶️ Start Strategy"
-            if st.button(btn_label):
-                strat["status"] = "Paused" if current_status == "Active" else "Active"
-                st.rerun()
+alloc_multiplier = st.sidebar.slider("Allocation Multiplier", 0.5, 1.5, 1.0, step=0.1)
 
-        st.subheader(f"Strategy: {strat_name}")
-        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
-        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | **Rebalance in:** {days_left} Days", unsafe_allow_html=True)
+# App Data Loading
+with st.spinner("Loading release historical dataset..."):
+    dataset = load_historical_dataset()
 
-        kite_status = st.session_state.get("_kite_status")
-        if kite_status == "live":
-            st.caption("🟢 Prices below are live from Zerodha Kite where available.")
-        elif kite_status:
-            st.caption(f"🟡 Kite live prices {kite_status} — showing Yahoo Finance closes instead.")
+# Split stock universe and benchmark
+if "^NSEI" in dataset.columns:
+    benchmark_series = dataset["^NSEI"]
+    stock_df = dataset.drop(columns=["^NSEI"])
+else:
+    stock_df = dataset
+    benchmark_series = dataset.iloc[:, 0] if not dataset.empty else None
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Allocated Capital", f"₹{metrics['allocated']:,.2f}")
-        m2.metric("Uninvested Cash", f"₹{metrics['cash_reserve']:,.2f}")
-        m3.metric("Unrealized P&L", f"₹{metrics['unrealized_pnl']:,.2f}")
-        m4.metric("Total P&L & Returns", f"₹{metrics['total_pnl']:,.2f}", delta=f"{metrics['returns_pct']:.2f}%")
+# Execution Trigger
+if st.button("🚀 Run Backtest Simulation", type="primary"):
+    st.info(f"Running simulation with Signal: **{signal_type}**")
 
-        st.markdown("---")
-        st.subheader("🔍 Live Stock Scanner & Rebalance Engine")
+    res_df = run_backtest_simulation(
+        price_df=stock_df,
+        benchmark_series=benchmark_series,
+        start_date="2020-01-01",
+        end_date="2026-09-18",
+        initial_capital=initial_cap,
+        top_n=top_n,
+        signal_type=signal_type,
+        use_regime_filter=use_regime_filter,
+        use_rank_buffer=use_rank_buffer,
+        buffer_threshold=buffer_threshold,
+        allocation_multiplier=alloc_multiplier,
+    )
 
-        scan_col1, scan_col2 = st.columns([2, 3])
-        with scan_col1:
-            run_scan = st.button("🚀 Run Live Stock Scan for this Strategy", type="primary", use_container_width=True)
+    if res_df is not None:
+        st.success("Backtest simulation completed!")
+        st.line_chart(res_df["Portfolio Value"])
 
-        if run_scan:
-            with st.spinner("Executing strategy parameters against selected asset groups..."):
-                current_symbols = [p["Symbol"] for p in strat.get("positions", [])]
-                scanned_tickers = run_strategy_stock_scanner(strat, current_holdings=current_symbols)
-                st.session_state[f"scanned_results_{strat_name}"] = scanned_tickers
-
-        scanned_results = st.session_state.get(f"scanned_results_{strat_name}", None)
-
-        if scanned_results is not None:
-            st.success(f"Scan Complete! Found **{len(scanned_results)}** target portfolio stocks across selected groups based on strategy rules.")
-            
-            sc_col1, sc_col2 = st.columns(2)
-            with sc_col1:
-                st.markdown("#### 📌 Current Holding Stocks")
-                if metrics["positions_data"]:
-                    st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
-                else:
-                    st.info("No active holdings currently allocated.")
-
-            with sc_col2:
-                st.markdown("#### 🔄 Updated / Scanned Portfolio Stocks")
-                prices_df = fetch_market_data(scanned_results, period="5d")
-                live_or_close = apply_live_price_overlay(prices_df, scanned_results)
-                held_symbols = {p["Symbol"] for p in strat.get("positions", [])}
-                scanned_rows = []
-                for ticker in scanned_results:
-                    cmp = live_or_close.get(ticker, 0.0)
-                    scanned_rows.append({
-                        "Symbol": ticker.replace(".NS", ""),
-                        "CMP": f"₹{cmp:,.2f}",
-                        "Status": "Held (in buffer)" if ticker in held_symbols else "Entry Target"
-                    })
-                st.dataframe(pd.DataFrame(scanned_rows), use_container_width=True)
-
-            if st.button("⚡ Execute Rebalance & Reinvest Capital", type="primary", use_container_width=True):
-                existing_positions = {p["Symbol"]: p for p in strat.get("positions", [])}
-                retained_symbols = [s for s in scanned_results if s in existing_positions]
-                new_symbols = [s for s in scanned_results if s not in existing_positions]
-                exited_symbols = [s for s in existing_positions if s not in scanned_results]
-
-                price_lookup_df = fetch_market_data(scanned_results + exited_symbols, period="5d")
-                live_or_close = apply_live_price_overlay(price_lookup_df, scanned_results + exited_symbols)
-
-                # Exited positions realize their P&L and free up cash; retained
-                # positions are left completely untouched (no simulated sell/rebuy)
-                freed_cash = 0.0
-                newly_realized = 0.0
-                for sym in exited_symbols:
-                    pos = existing_positions[sym]
-                    exit_price = live_or_close.get(sym, pos["Buy Price"])
-                    proceeds = exit_price * pos["Buy Qty"]
-                    freed_cash += proceeds
-                    newly_realized += proceeds - (pos["Buy Price"] * pos["Buy Qty"])
-
-                new_positions = [existing_positions[s] for s in retained_symbols]
-
-                investable_for_new = (metrics["cash_reserve"] + freed_cash) * strat.get("allocation_multiplier", 1.0)
-                per_new_alloc = investable_for_new / len(new_symbols) if new_symbols else 0.0
-
-                for ticker in new_symbols:
-                    cmp = live_or_close.get(ticker)
-                    if not cmp or cmp <= 0:
-                        continue
-                    qty = int(per_new_alloc // cmp)
-                    if qty > 0:
-                        new_positions.append({
-                            "Symbol": ticker,
-                            "Buy Qty": qty,
-                            "Buy Price": cmp,
-                            "Entry Date": datetime.now().strftime("%Y-%m-%d")
-                        })
-
-                strat["positions"] = new_positions
-                strat["realized_pnl"] = strat.get("realized_pnl", 0.0) + newly_realized
-                st.session_state[f"scanned_results_{strat_name}"] = None
-                st.success(
-                    f"Rebalanced '{strat_name}': kept {len(retained_symbols)} in the buffer, "
-                    f"exited {len(exited_symbols)}, entered {len(new_symbols)} new."
-                )
-                st.rerun()
-
-        else:
-            st.markdown("#### 📋 Current Portfolio Holdings")
-            if metrics["positions_data"]:
-                st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
-            else:
-                st.info("No active scanned holdings for this strategy. Click 'Run Live Stock Scan' above.")
-
+        # Summary Metrics
+        tot_ret = (res_df["Portfolio Value"].iloc[-1] - initial_cap) / initial_cap * 100
+        c1, c2 = st.columns(2)
+        c1.metric("Final Portfolio Value", f"₹{res_df['Portfolio Value'].iloc[-1]:,.2f}")
+        c2.metric("Total Strategy Return", f"{tot_ret:.2f}%")
     else:
-        st.title("MY PORTFOLIO")
-        
-        tot_allocated = 0.0
-        tot_holding_val = 0.0
-        tot_realized_pnl = 0.0
-        tot_unrealized_pnl = 0.0
-
-        for name, strat in st.session_state.strategies.items():
-            m = calculate_strategy_metrics(strat)
-            tot_allocated += m["allocated"]
-            tot_holding_val += m["current_holding_val"]
-            tot_realized_pnl += m["realized_pnl"]
-            tot_unrealized_pnl += m["unrealized_pnl"]
-
-        tot_pnl = tot_realized_pnl + tot_unrealized_pnl
-        tot_returns_pct = (tot_pnl / tot_allocated * 100) if tot_allocated > 0 else 0.0
-        tot_portfolio_val = tot_allocated + tot_pnl
-
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Total Allocated Capital", f"₹{tot_allocated:,.2f}")
-        kpi2.metric("Total Realized P&L", f"₹{tot_realized_pnl:,.2f}")
-        kpi3.metric("Total Portfolio P&L", f"₹{tot_pnl:,.2f}", delta=f"{tot_returns_pct:.2f}%")
-
-        kpi4, kpi5, kpi6 = st.columns(3)
-        kpi4.metric("Current Holdings Value", f"₹{tot_holding_val:,.2f}")
-        kpi5.metric("Total Unrealized P&L", f"₹{tot_unrealized_pnl:,.2f}")
-        kpi6.metric("Total Portfolio Balance", f"₹{tot_portfolio_val:,.2f}")
-
-        st.markdown("---")
-        st.subheader("Real Strategies")
-
-        strat_cols = st.columns(3)
-        keys = list(st.session_state.strategies.keys())
-
-        for i, name in enumerate(keys):
-            strat = st.session_state.strategies[name]
-            sm = calculate_strategy_metrics(strat)
-            days_left = calculate_days_to_rebalance(strat.get("rebalance_day", 1))
-            col = strat_cols[i % 3]
-
-            with col:
-                with st.container(border=True):
-                    c_head1, c_head2 = st.columns([3, 2])
-                    with c_head1:
-                        st.markdown(f"### **{name}**")
-                        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
-                        st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
-                    
-                    with c_head2:
-                        act_col1, act_col2, act_col3 = st.columns(3)
-                        is_active = strat["status"] == "Active"
-                        
-                        if act_col1.button("⏸️" if is_active else "▶️", key=f"toggle_{name}", help="Start/Stop Strategy"):
-                            strat["status"] = "Paused" if is_active else "Active"
-                            st.rerun()
-
-                        if act_col2.button("✏️", key=f"edit_{name}", help="Edit Strategy Config"):
-                            st.session_state.editing_strategy_name = name
-                            st.session_state.navigation_tab = "STRATEGY_BUILDER"
-                            st.rerun()
-
-                        if act_col3.button("🗑️", key=f"del_{name}", help="Delete Strategy"):
-                            del st.session_state.strategies[name]
-                            st.rerun()
-
-                    st.caption(f"Groups: {', '.join(strat.get('groups', ['Nifty 500']))} | Multiplier: {strat.get('allocation_multiplier', 1.0)}x")
-                    st.caption(f"Rebalance Date: Day {strat.get('rebalance_day', 1)} | {days_left} days left")
-                    st.markdown(f"**Allocated:** ₹{sm['allocated']:,.2f}")
-                    st.markdown(f"**Realized P&L:** ₹{sm['realized_pnl']:,.2f}")
-                    st.markdown(f"**Unrealized P&L:** ₹{sm['unrealized_pnl']:,.2f}")
-                    
-                    pnl_color = "green" if sm['total_pnl'] >= 0 else "red"
-                    st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{sm['total_pnl']:,.2f} ({sm['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
-
-                    if st.button("🔍 Open Scanner & Details", key=f"view_detail_{name}", use_container_width=True):
-                        st.session_state.active_strategy_view = name
-                        st.rerun()
-
-# ==========================================
-# PAGE 2: STRATEGY BUILDER & CONFIG
-# ==========================================
-elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
-    edit_mode = st.session_state.editing_strategy_name is not None
-    edit_strat = st.session_state.strategies.get(st.session_state.editing_strategy_name, {}) if edit_mode else {}
-
-    st.subheader("✏️ EDIT STRATEGY ENGINE" if edit_mode else "➕ CREATE STRATEGY ENGINE")
-    
-    st.markdown("#### Investment & Capital Details")
-    
-    inv_r1, inv_r2, inv_r3 = st.columns(3)
-    with inv_r1:
-        st_type = st.radio("Strategy Type :", ["Real", "Virtual"], index=0 if edit_strat.get("type") == "Real" else 1, horizontal=True)
-        default_name = st.session_state.editing_strategy_name if edit_mode else "New Momentum Strategy"
-        strat_name_input = st.text_input("Strategy Name :", value=default_name, disabled=edit_mode)
-    with inv_r2:
-        tot_alloc = st.number_input("Total Allocation Capital (₹) :", value=float(edit_strat.get("allocated", 100000.0)), step=10000.0)
-        rebal_freq = st.selectbox("Rebalance Frequency :", ["Monthly", "Weekly", "Quarterly"])
-    with inv_r3:
-        rebal_day = st.number_input("Rebalance Day of Month (1-28) :", value=int(edit_strat.get("rebalance_day", 1)), min_value=1, max_value=28)
-        alloc_multiplier = st.number_input("Allocation Multiplier (X times) :", value=float(edit_strat.get("allocation_multiplier", 1.0)), min_value=0.1, max_value=10.0, step=0.1)
-
-    st.markdown("---")
-    st.markdown("#### Asset Universe Selection (Groups Checkboxes)")
-
-    existing_groups = edit_strat.get("groups", ["Nifty 500"])
-    grp_c1, grp_c2, grp_c3 = st.columns(3)
-    with grp_c1:
-        grp_nifty500 = st.checkbox("Nifty 500 Universe", value=("Nifty 500" in existing_groups))
-        grp_nifty200 = st.checkbox("Nifty 200 Universe", value=("Nifty 200" in existing_groups))
-    with grp_c2:
-        grp_all_etfs = st.checkbox("All ETFs Universe", value=("All ETFs" in existing_groups))
-        grp_gold_etf = st.checkbox("Gold ETF Only", value=("Gold ETF" in existing_groups))
-    with grp_c3:
-        grp_liquidbees = st.checkbox("LiquidBEES Only", value=("LiquidBEES" in existing_groups))
-        grp_gov_bond = st.checkbox("Gov Bond Only", value=("Gov Bond" in existing_groups))
-
-    st.markdown("---")
-    st.markdown("#### Ranking, Entry & Exit Parameters")
-
-    rank_c1, rank_c2 = st.columns(2)
-    with rank_c1:
-        entry_rank = st.number_input("Entry Rank Stocks (Top N Target) :", value=int(edit_strat.get("entry_rank", 10)), min_value=1, max_value=50)
-    with rank_c2:
-        exit_rank = st.number_input("Exit Rank Threshold :", value=int(edit_strat.get("exit_rank", 20)), min_value=1, max_value=100, help="A held stock is only sold once it ranks worse than this. Keep it >= Entry Rank for a buffer effect; equal to Entry Rank means no buffer.")
-
-    st.markdown("---")
-    st.markdown("#### Technical Features & Indicator Rules")
-
-    sd_r1, sd_r2, sd_r3 = st.columns(3)
-    with sd_r1:
-        st.caption("Lookback Periods (Days) :")
-        existing_periods = edit_strat.get("period_days", [252, 120, 60])
-        p252 = st.checkbox("252 Days (1 Year)", value=(252 in existing_periods))
-        p120 = st.checkbox("120 Days (6 Months)", value=(120 in existing_periods))
-        p90 = st.checkbox("90 Days (3 Months)", value=(90 in existing_periods))
-        p60 = st.checkbox("60 Days (2 Months)", value=(60 in existing_periods))
-    
-    with sd_r2:
-        st.caption("Proximity Filters (% from Period High/Low) :")
-        pct_high = st.number_input("% Within Period High :", value=float(edit_strat.get("pct_from_high", 15.0)))
-        pct_low = st.number_input("% Above Period Low :", value=float(edit_strat.get("pct_from_low", 0.0)))
-
-    with sd_r3:
-        ma_options = ["None", "200 EMA", "100 EMA", "200 SMA", "50 SMA"]
-        ma_val = edit_strat.get("moving_average", "200 EMA")
-        ma_idx = ma_options.index(ma_val) if ma_val in ma_options else 1
-        selected_ma = st.selectbox("Moving Average Filter :", ma_options, index=ma_idx)
-
-        use_rs = st.checkbox("Enable Relative Strength Ratio Filter", value=edit_strat.get("use_rs", True))
-        rs_benchmark = st.selectbox("RS Benchmark Ratio :", ["Nifty 500 / G-Sec", "Nifty 50 / Liquid ETF"])
-
-    st.markdown("---")
-    save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
-    if st.button(save_label, type="primary", use_container_width=True):
-        selected_groups = []
-        if grp_nifty500: selected_groups.append("Nifty 500")
-        if grp_nifty200: selected_groups.append("Nifty 200")
-        if grp_all_etfs: selected_groups.append("All ETFs")
-        if grp_gold_etf: selected_groups.append("Gold ETF")
-        if grp_liquidbees: selected_groups.append("LiquidBEES")
-        if grp_gov_bond: selected_groups.append("Gov Bond")
-
-        selected_periods = []
-        weights = []
-        if p252:
-            selected_periods.append(252)
-            weights.append(0.4)
-        if p120:
-            selected_periods.append(120)
-            weights.append(0.3)
-        if p90:
-            selected_periods.append(90)
-            weights.append(0.2)
-        if p60:
-            selected_periods.append(60)
-            weights.append(0.1)
-
-        target_name = st.session_state.editing_strategy_name if edit_mode else strat_name_input
-
-        st.session_state.strategies[target_name] = {
-            "created_date": edit_strat.get("created_date", datetime.now().strftime("%Y-%m-%d")),
-            "status": edit_strat.get("status", "Active"),
-            "type": st_type,
-            "allocated": float(tot_alloc),
-            "realized_pnl": edit_strat.get("realized_pnl", 0.0),
-            "rebalance_freq": rebal_freq,
-            "rebalance_day": rebal_day,
-            "groups": selected_groups if selected_groups else ["Nifty 500"],
-            "allocation_multiplier": float(alloc_multiplier),
-            "entry_rank": entry_rank,
-            "exit_rank": exit_rank,
-            "period_days": selected_periods if selected_periods else [252],
-            "period_weights": weights if weights else [1.0],
-            "pct_from_high": pct_high,
-            "pct_from_low": pct_low,
-            "moving_average": selected_ma,
-            "use_rs": use_rs,
-            "rs_benchmark": rs_benchmark,
-            "positions": edit_strat.get("positions", [])
-        }
-        
-        st.session_state.editing_strategy_name = None
-        st.session_state.navigation_tab = "DASHBOARD"
-        st.rerun()
-
-# ==========================================
-# PAGE 3: BACKTEST ENGINE SECTION
-# ==========================================
-elif st.session_state.navigation_tab == "BACKTEST":
-    st.title("📈 BACKTEST STUDIO")
-    st.caption("Simulate historical momentum performance with periodic rebalancing, entry/exit rankings, moving average trend rules, asset groups, multiplier scaling, and RS regime filters.")
-
-    strategy_names = list(st.session_state.strategies.keys())
-    selected_backtest_strat = st.selectbox("Select Strategy to Backtest :", strategy_names)
-
-    bt_strat_config = st.session_state.strategies[selected_backtest_strat]
-
-    bt_c1, bt_c2, bt_c3 = st.columns(3)
-    with bt_c1:
-        initial_cap = st.number_input("Initial Backtest Capital (₹) :", value=100000.0, step=10000.0)
-    with bt_c2:
-        start_d = st.date_input("Start Date :", value=datetime.now() - timedelta(days=365*3))
-    with bt_c3:
-        end_d = st.date_input("End Date :", value=datetime.now())
-
-    run_bt_btn = st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True)
-
-    if run_bt_btn:
-        with st.spinner("Running historical rebalance simulation against market data..."):
-            bt_results = run_backtest_simulation(bt_strat_config, initial_cap, start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d"))
-
-            if bt_results is not None and not bt_results.empty:
-                st.success("Backtest Completed Successfully!")
-                
-                final_val = float(bt_results["Portfolio Value"].iloc[-1])
-                total_return_pct = ((final_val - initial_cap) / initial_cap) * 100
-                peak = bt_results["Portfolio Value"].cummax()
-                drawdown = (bt_results["Portfolio Value"] - peak) / peak
-                max_drawdown_pct = drawdown.min() * 100
-
-                res_m1, res_m2, res_m3 = st.columns(3)
-                res_m1.metric("Final Portfolio Value", f"₹{final_val:,.2f}")
-                res_m2.metric("Total Backtest Return", f"{total_return_pct:.2f}%")
-                res_m3.metric("Max Drawdown", f"{max_drawdown_pct:.2f}%")
-
-                st.markdown("#### Portfolio Value Equity Curve")
-                st.line_chart(bt_results["Portfolio Value"])
-
-                st.markdown("#### Historical Monthly Portfolio Curve Data")
-                st.dataframe(bt_results, use_container_width=True)
-            else:
-                st.error("Insufficient market data for the selected timeframe. Try selecting a broader timeframe.")
+        st.error("Insufficient price history available for the selected date range.")
