@@ -1,5 +1,7 @@
 import io
+import re
 from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import requests
@@ -24,18 +26,256 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# ==========================================
+# NSE ETF UNIVERSE
+# ==========================================
+NSE_HOME_URL = "https://www.nseindia.com/"
+NSE_ETF_URL = "https://www.nseindia.com/api/allETFList"
+
+ETF_GROUP_NAMES = [
+    "Defensive ETFs",
+    "Domestic ETFs",
+    "International ETFs",
+    "All ETFs",
+]
+
+ETF_FALLBACK_TICKERS = [
+    "GOLDBEES.NS",
+    "LIQUIDCASE.NS",
+    "SETFGSEC.NS",
+    "NIFTYBEES.NS",
+    "JUNIORBEES.NS",
+    "BANKBEES.NS",
+]
+
+
+def _create_nse_session():
+    session = requests.Session()
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/131 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": NSE_HOME_URL,
+            "Origin": "https://www.nseindia.com",
+        }
+    )
+    return session
+
+
+def _get_first_value(row, keys):
+    for key in keys:
+        value = row.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+
+    metadata = row.get("meta")
+    if isinstance(metadata, dict):
+        for key in keys:
+            value = metadata.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+
+    return ""
+
+
+def _extract_nse_etf_rows(payload):
+    if isinstance(payload, dict):
+        rows = payload.get("data", payload)
+    else:
+        rows = payload
+
+    if not isinstance(rows, list):
+        return []
+
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _normalise_etf_symbol(symbol):
+    symbol = str(symbol).strip().upper()
+    if not symbol:
+        return ""
+    if symbol.endswith(".NS"):
+        return symbol
+    return f"{symbol}.NS"
+
+
+def _classify_etf(name, symbol):
+    text = f"{name} {symbol}".upper()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+
+    defensive_terms = [
+        "GOLD",
+        "SILVER",
+        "LIQUID",
+        "GILT",
+        "GSEC",
+        "GOVERNMENT",
+        "GOVT",
+        "TREASURY",
+        "BOND",
+        "DEBT",
+        "OVERNIGHT",
+        "MONEY MARKET",
+        "CORPORATE BOND",
+        "AAA",
+    ]
+
+    international_terms = [
+        "INTERNATIONAL",
+        "GLOBAL",
+        "WORLD",
+        "NASDAQ",
+        "S&P 500",
+        "SP 500",
+        "S&P500",
+        "MSCI",
+        "HANG SENG",
+        "CHINA",
+        "JAPAN",
+        "EUROPE",
+        "US EQUITY",
+        "USA",
+        "UNITED STATES",
+        "UNITED KINGDOM",
+        "UK EQUITY",
+        "GERMANY",
+        "FRANCE",
+        "TAIWAN",
+        "BRAZIL",
+        "EMERGING MARKET",
+        "NYSE",
+    ]
+
+    if any(term in text for term in defensive_terms):
+        return "Defensive ETFs"
+
+    if any(term in text for term in international_terms):
+        return "International ETFs"
+
+    return "Domestic ETFs"
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_nse_etf_catalog():
+    try:
+        session = _create_nse_session()
+        session.get(NSE_HOME_URL, timeout=15)
+
+        response = session.get(NSE_ETF_URL, timeout=20)
+        response.raise_for_status()
+
+        rows = _extract_nse_etf_rows(response.json())
+        records = []
+        seen_symbols = set()
+
+        for row in rows:
+            symbol = _get_first_value(row, ["symbol", "Symbol", "SYMBOL"])
+            name = _get_first_value(
+                row,
+                [
+                    "name",
+                    "Name",
+                    "companyName",
+                    "companyname",
+                    "securityName",
+                    "securityname",
+                ],
+            )
+
+            yahoo_symbol = _normalise_etf_symbol(symbol)
+            if not yahoo_symbol or yahoo_symbol in seen_symbols:
+                continue
+
+            seen_symbols.add(yahoo_symbol)
+            records.append(
+                {
+                    "symbol": yahoo_symbol,
+                    "name": name,
+                    "group": _classify_etf(name, symbol),
+                }
+            )
+
+        catalog = pd.DataFrame(records, columns=["symbol", "name", "group"])
+        if not catalog.empty:
+            return catalog
+
+    except Exception:
+        pass
+
+    return pd.DataFrame(
+        [
+            {
+                "symbol": ticker,
+                "name": "",
+                "group": _classify_etf("", ticker),
+            }
+            for ticker in ETF_FALLBACK_TICKERS
+        ]
+    )
+
+
+def get_etf_tickers(group=None):
+    catalog = load_nse_etf_catalog()
+
+    if group in ETF_GROUP_NAMES and group != "All ETFs":
+        catalog = catalog[catalog["group"] == group]
+
+    return catalog["symbol"].dropna().unique().tolist()
+
+
+def get_etf_group_counts():
+    catalog = load_nse_etf_catalog()
+    counts = {
+        "Defensive ETFs": 0,
+        "Domestic ETFs": 0,
+        "International ETFs": 0,
+        "All ETFs": len(catalog),
+    }
+
+    if not catalog.empty:
+        counts.update(catalog["group"].value_counts().to_dict())
+
+    return counts
+
+
 ASSET_GROUPS_MAPPING = {
-    "Gold ETF": ["GOLDBEES.NS"],
-    "LiquidBEES": ["LIQUIDCASE.NS"],
-    "Gov Bond": ["SETFGSEC.NS"],
-    "All ETFs": ["GOLDBEES.NS", "LIQUIDCASE.NS", "SETFGSEC.NS", "NIFTYBEES.NS", "JUNIORBEES.NS", "BANKBEES.NS"]
+    "Defensive ETFs": get_etf_tickers("Defensive ETFs"),
+    "Domestic ETFs": get_etf_tickers("Domestic ETFs"),
+    "International ETFs": get_etf_tickers("International ETFs"),
+    "All ETFs": get_etf_tickers("All ETFs"),
+
+    # legacy group names
+    "Gold ETF": [
+        ticker
+        for ticker in get_etf_tickers("Defensive ETFs")
+        if "GOLD" in ticker.upper()
+    ],
+    "LiquidBEES": [
+        ticker
+        for ticker in get_etf_tickers("Defensive ETFs")
+        if "LIQUID" in ticker.upper()
+    ],
+    "Gov Bond": [
+        ticker
+        for ticker in get_etf_tickers("Defensive ETFs")
+        if any(term in ticker.upper() for term in ["GSEC", "GILT", "BOND", "TREASURY", "GOV"])
+    ],
 }
+
+if not ASSET_GROUPS_MAPPING["Gold ETF"]:
+    ASSET_GROUPS_MAPPING["Gold ETF"] = ["GOLDBEES.NS"]
+
+if not ASSET_GROUPS_MAPPING["LiquidBEES"]:
+    ASSET_GROUPS_MAPPING["LiquidBEES"] = ["LIQUIDCASE.NS"]
+
+if not ASSET_GROUPS_MAPPING["Gov Bond"]:
+    ASSET_GROUPS_MAPPING["Gov Bond"] = ["SETFGSEC.NS"]
 
 NIFTY_REGIME_TICKER = "^CRSLDX"
 GSEC_REGIME_TICKER = "SETFGSEC.NS"
-
-DATA_URL_PARQUET = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.parquet"
-DATA_URL_CSV = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.csv.gz"
 
 # ==========================================
 # DATA FETCHING ENGINE
@@ -54,10 +294,14 @@ def load_historical_release_dataset():
         except Exception:
             return pd.DataFrame()
 
+
+DATA_URL_PARQUET = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.parquet"
+DATA_URL_CSV = "https://github.com/rishabhjain0295-web/nifty500-momentum-backtest/releases/download/data-v1/nifty500_historical.csv.gz"
+
 @st.cache_data(ttl=86400)
 def get_trusted_tickers_by_group(groups):
     tickers = []
-    
+
     if "Nifty 500" in groups or "Nifty 200" in groups:
         official_nse_url = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
         session = requests.Session()
@@ -85,26 +329,42 @@ def get_trusted_tickers_by_group(groups):
             except Exception:
                 tickers.extend(["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "SBIN.NS"])
 
-    for grp in groups:
-        if grp in ASSET_GROUPS_MAPPING:
-            tickers.extend(ASSET_GROUPS_MAPPING[grp])
+    for group in groups:
+        if group in ETF_GROUP_NAMES:
+            tickers.extend(get_etf_tickers(group))
+        elif group in ASSET_GROUPS_MAPPING:
+            tickers.extend(ASSET_GROUPS_MAPPING[group])
 
     if not tickers:
         tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
 
-    return list(set(tickers))
+    return sorted(set(tickers))
+
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y"):
-    all_tickers = list(set(tickers + ASSET_GROUPS_MAPPING["All ETFs"] + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
-    data = yf.download(tickers=all_tickers, period=period, interval="1d", auto_adjust=True, progress=False)
-    
+    all_tickers = list(
+        set(
+            list(tickers)
+            + get_etf_tickers("All ETFs")
+            + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
+        )
+    )
+
+    data = yf.download(
+        tickers=all_tickers,
+        period=period,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+    )
+
     if isinstance(data.columns, pd.MultiIndex):
         prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
     else:
         prices = data
-        
-    prices = prices.dropna(thresh=int(len(prices)*0.7), axis=1).ffill().bfill()
+
+    prices = prices.dropna(thresh=max(1, int(len(prices) * 0.7)), axis=1).ffill().bfill()
     return prices
 
 # ==========================================
@@ -114,6 +374,7 @@ def calculate_simple_momentum(price_df, lookback_days=126):
     if len(price_df) < lookback_days:
         return pd.Series(dtype=float)
     return (price_df.iloc[-1] / price_df.iloc[-lookback_days]) - 1.0
+
 
 def calculate_volatility_adjusted_momentum(price_df, lookback_days=126):
     if len(price_df) < lookback_days:
@@ -137,17 +398,20 @@ def calculate_volatility_adjusted_momentum(price_df, lookback_days=126):
 
     return pd.Series(scores)
 
+
 def get_momentum_scores(price_df, signal_type="Simple Momentum", lookback_days=126):
     if signal_type == "Volatility-Adjusted Momentum":
         return calculate_volatility_adjusted_momentum(price_df, lookback_days)
     else:
         return calculate_simple_momentum(price_df, lookback_days)
 
+
 def is_regime_bullish(benchmark_series, current_date, sma_period=200):
     sub = benchmark_series.loc[:current_date].dropna()
     if len(sub) < sma_period:
         return True
     return sub.iloc[-1] >= sub.tail(sma_period).mean()
+
 
 def apply_rank_buffering(current_holdings, ranked_candidates, target_size, buffer_rank):
     new_portfolio = []
@@ -187,7 +451,7 @@ if "strategies" not in st.session_state:
             "realized_pnl": 0.0,
             "rebalance_freq": "Monthly",
             "rebalance_day": 1,
-            "groups": ["Nifty 500", "Gold ETF"],
+            "groups": ["Nifty 500", "Defensive ETFs"],
             "allocation_multiplier": 1.0,
             "entry_rank": 10,
             "exit_rank": 20,
@@ -218,11 +482,12 @@ def calculate_days_to_rebalance(rebalance_day):
             target_date = datetime(today.year, today.month + 1, min(rebalance_day, 28))
     return (target_date - today).days
 
+
 def calculate_strategy_metrics(strat):
     positions = strat.get("positions", [])
     realized_pnl = strat.get("realized_pnl", 0.0)
     allocated = strat["allocated"]
-    
+
     unrealized_pnl = 0.0
     current_holding_val = 0.0
     total_cost_basis = 0.0
@@ -231,19 +496,19 @@ def calculate_strategy_metrics(strat):
     if positions and strat["status"] == "Active":
         tickers = [p["Symbol"] for p in positions]
         prices_df = fetch_market_data(tickers, period="1mo")
-        
+
         for pos in positions:
             sym = pos["Symbol"]
             buy_qty = pos["Buy Qty"]
             buy_price = pos["Buy Price"]
-            
+
             cmp_price = float(prices_df[sym].dropna().iloc[-1]) if (not prices_df.empty and sym in prices_df.columns) else buy_price
-            
+
             cost_val = buy_price * buy_qty
             curr_val = cmp_price * buy_qty
             pos_unrealized = curr_val - cost_val
             pos_pnl_pct = ((cmp_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
-            
+
             total_cost_basis += cost_val
             unrealized_pnl += pos_unrealized
             current_holding_val += curr_val
@@ -276,9 +541,10 @@ def calculate_strategy_metrics(strat):
         "positions_data": positions_data
     }
 
+
 def run_strategy_stock_scanner(strat, price_subset=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
-    
+
     if price_subset is None:
         group_tickers = get_trusted_tickers_by_group(selected_groups)
         prices_df = fetch_market_data(group_tickers, period="2y")
@@ -321,6 +587,7 @@ def run_strategy_stock_scanner(strat, price_subset=None):
     target_count = strat.get("entry_rank", 10)
     return ranked[:target_count]
 
+
 def run_backtest_simulation(
     strat_config,
     initial_capital,
@@ -337,7 +604,7 @@ def run_backtest_simulation(
         groups = strat_config.get("groups", ["Nifty 500"])
         tickers = get_trusted_tickers_by_group(groups)
         price_df = fetch_market_data(tickers, period="5y")
-    
+
     sub_prices = price_df.loc[start_date:end_date]
     if len(sub_prices) < 252:
         return None
@@ -355,7 +622,7 @@ def run_backtest_simulation(
     for i in range(len(rebalance_dates) - 1):
         dt = rebalance_dates[i]
         hist_df = sub_prices.loc[:dt]
-        
+
         if len(hist_df) < 126:
             continue
 
@@ -430,11 +697,10 @@ st.markdown("---")
 # PAGE 1: PORTFOLIO DASHBOARD & DRILL-DOWN
 # ==========================================
 if st.session_state.navigation_tab == "DASHBOARD":
-    
     if st.session_state.active_strategy_view is not None:
         strat_name = st.session_state.active_strategy_view
         strat = st.session_state.strategies.get(strat_name)
-        
+
         if not strat:
             st.session_state.active_strategy_view = None
             st.rerun()
@@ -456,7 +722,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         st.subheader(f"Strategy: {strat_name}")
         status_class = "status-active" if strat["status"] == "Active" else "status-paused"
-        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | **Rebalance in:** {days_left} Days", unsafe_allow_html=True)
+        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | **Rebalance Day:** {strat.get('rebalance_day', 1)} | **Days left:** {days_left}", unsafe_allow_html=True)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Allocated Capital", f"₹{metrics['allocated']:,.2f}")
@@ -480,7 +746,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         if scanned_results is not None:
             st.success(f"Scan Complete! Found **{len(scanned_results)}** target portfolio stocks across selected groups based on strategy rules.")
-            
+
             sc_col1, sc_col2 = st.columns(2)
             with sc_col1:
                 st.markdown("#### 📌 Current Holding Stocks")
@@ -505,14 +771,14 @@ if st.session_state.navigation_tab == "DASHBOARD":
             if st.button("⚡ Execute Rebalance & Reinvest Capital", type="primary", use_container_width=True):
                 reinvest_pool = metrics["current_total_value"] * strat.get("allocation_multiplier", 1.0)
                 per_stock_alloc = reinvest_pool / len(scanned_results) if scanned_results else 0.0
-                
+
                 prices_df = fetch_market_data(scanned_results, period="5d")
                 new_positions = []
-                
+
                 for ticker in scanned_results:
                     cmp = float(prices_df[ticker].dropna().iloc[-1]) if (not prices_df.empty and ticker in prices_df.columns) else 1.0
                     qty = int(per_stock_alloc // cmp) if cmp > 0 else 0
-                    
+
                     if qty > 0:
                         new_positions.append({
                             "Symbol": ticker,
@@ -536,7 +802,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
     else:
         st.title("MY PORTFOLIO")
-        
+
         tot_allocated = 0.0
         tot_holding_val = 0.0
         tot_realized_pnl = 0.0
@@ -582,11 +848,11 @@ if st.session_state.navigation_tab == "DASHBOARD":
                         st.markdown(f"### **{name}**")
                         status_class = "status-active" if strat["status"] == "Active" else "status-paused"
                         st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
-                    
+
                     with c_head2:
                         act_col1, act_col2, act_col3 = st.columns(3)
                         is_active = strat["status"] == "Active"
-                        
+
                         if act_col1.button("⏸️" if is_active else "▶️", key=f"toggle_{name}"):
                             strat["status"] = "Paused" if is_active else "Active"
                             st.rerun()
@@ -605,7 +871,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
                     st.markdown(f"**Allocated:** ₹{sm['allocated']:,.2f}")
                     st.markdown(f"**Realized P&L:** ₹{sm['realized_pnl']:,.2f}")
                     st.markdown(f"**Unrealized P&L:** ₹{sm['unrealized_pnl']:,.2f}")
-                    
+
                     pnl_color = "green" if sm['total_pnl'] >= 0 else "red"
                     st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{sm['total_pnl']:,.2f} ({sm['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
 
@@ -621,9 +887,9 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     edit_strat = st.session_state.strategies.get(st.session_state.editing_strategy_name, {}) if edit_mode else {}
 
     st.subheader("✏️ EDIT STRATEGY ENGINE" if edit_mode else "➕ CREATE STRATEGY ENGINE")
-    
+
     st.markdown("#### Investment & Capital Details")
-    
+
     inv_r1, inv_r2, inv_r3 = st.columns(3)
     with inv_r1:
         st_type = st.radio("Strategy Type :", ["Real", "Virtual"], index=0 if edit_strat.get("type") == "Real" else 1, horizontal=True)
@@ -641,15 +907,29 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
 
     existing_groups = edit_strat.get("groups", ["Nifty 500"])
     grp_c1, grp_c2, grp_c3 = st.columns(3)
+
     with grp_c1:
         grp_nifty500 = st.checkbox("Nifty 500 Universe", value=("Nifty 500" in existing_groups))
         grp_nifty200 = st.checkbox("Nifty 200 Universe", value=("Nifty 200" in existing_groups))
+        grp_defensive = st.checkbox("Defensive ETFs", value=("Defensive ETFs" in existing_groups))
+
     with grp_c2:
-        grp_all_etfs = st.checkbox("All ETFs Universe", value=("All ETFs" in existing_groups))
-        grp_gold_etf = st.checkbox("Gold ETF Only", value=("Gold ETF" in existing_groups))
+        grp_domestic = st.checkbox("Domestic ETFs", value=("Domestic ETFs" in existing_groups))
+        grp_international = st.checkbox("International ETFs", value=("International ETFs" in existing_groups))
+        grp_all_etfs = st.checkbox("All ETFs", value=("All ETFs" in existing_groups))
+
     with grp_c3:
+        grp_gold_etf = st.checkbox("Gold ETF Only", value=("Gold ETF" in existing_groups))
         grp_liquidbees = st.checkbox("LiquidBEES Only", value=("LiquidBEES" in existing_groups))
         grp_gov_bond = st.checkbox("Gov Bond Only", value=("Gov Bond" in existing_groups))
+
+    with st.expander("View ETF counts in this universe", expanded=False):
+        etf_counts = get_etf_group_counts()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Defensive", etf_counts["Defensive ETFs"])
+        c2.metric("Domestic", etf_counts["Domestic ETFs"])
+        c3.metric("International", etf_counts["International ETFs"])
+        c4.metric("All ETFs", etf_counts["All ETFs"])
 
     st.markdown("---")
     st.markdown("#### Signal & Execution Layer Settings")
@@ -673,6 +953,9 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         selected_groups = []
         if grp_nifty500: selected_groups.append("Nifty 500")
         if grp_nifty200: selected_groups.append("Nifty 200")
+        if grp_defensive: selected_groups.append("Defensive ETFs")
+        if grp_domestic: selected_groups.append("Domestic ETFs")
+        if grp_international: selected_groups.append("International ETFs")
         if grp_all_etfs: selected_groups.append("All ETFs")
         if grp_gold_etf: selected_groups.append("Gold ETF")
         if grp_liquidbees: selected_groups.append("LiquidBEES")
@@ -700,7 +983,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "use_rs": True,
             "positions": edit_strat.get("positions", [])
         }
-        
+
         st.session_state.editing_strategy_name = None
         st.session_state.navigation_tab = "DASHBOARD"
         st.rerun()
@@ -737,7 +1020,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
     if run_bt_btn:
         with st.spinner("Loading dataset & running simulation..."):
             rel_df = load_historical_release_dataset()
-            
+
             benchmark_series = None
             if "^NSEI" in rel_df.columns:
                 benchmark_series = rel_df["^NSEI"]
@@ -760,7 +1043,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
             if bt_results is not None and not bt_results.empty:
                 st.success("Backtest Completed Successfully!")
-                
+
                 final_val = float(bt_results["Portfolio Value"].iloc[-1])
                 total_return_pct = ((final_val - initial_cap) / initial_cap) * 100
                 peak = bt_results["Portfolio Value"].cummax()
