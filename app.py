@@ -93,10 +93,6 @@ ETF_FALLBACK_TICKERS = [
     "BANKBEES.NS",
 ]
 
-
-# ==========================================
-# ZERODHA CONNECTION
-# ==========================================
 KITE_SECRET_NAMES = [
     "KITE_API_KEY",
     "KITE_API_SECRET",
@@ -106,13 +102,11 @@ KITE_SECRET_NAMES = [
 ]
 
 
+# ==========================================
+# ZERODHA CONNECTION
+# ==========================================
 @st.cache_resource(ttl=1200, show_spinner=False)
 def get_kite_client():
-    """
-    Authenticate with Zerodha.
-
-    Returns None if credentials are missing or login fails.
-    """
     try:
         missing = [
             key
@@ -142,12 +136,6 @@ def get_kite_client():
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_nse_instrument_map():
-    """
-    Download the NSE instrument master from Zerodha.
-
-    This is used to convert symbols such as NIFTYBEES.NS into
-    Zerodha instrument tokens.
-    """
     kite = get_kite_client()
 
     if kite is None:
@@ -228,12 +216,6 @@ def _clean_tickers(tickers):
 
 
 def fetch_from_zerodha(tickers, period="5y"):
-    """
-    Fetch daily closing prices from Zerodha.
-
-    Returns:
-        prices_dataframe, unavailable_tickers
-    """
     requested = _clean_tickers(tickers)
     kite = get_kite_client()
     instruments = get_nse_instrument_map()
@@ -290,15 +272,10 @@ def fetch_from_zerodha(tickers, period="5y"):
                 candle_df["date"]
             )
 
-            candle_df = (
-                candle_df
-                .set_index("date")
-                .sort_index()
-            )
+            candle_df = candle_df.set_index("date").sort_index()
 
             prices[ticker] = candle_df["close"]
 
-            # Avoid excessive API requests.
             time.sleep(0.15)
 
         except Exception:
@@ -311,9 +288,6 @@ def fetch_from_zerodha(tickers, period="5y"):
 
 
 def fetch_from_yahoo(tickers, period="5y"):
-    """
-    Fetch data from Yahoo Finance for missing Zerodha symbols.
-    """
     requested = _clean_tickers(tickers)
 
     if not requested:
@@ -341,7 +315,6 @@ def fetch_from_yahoo(tickers, period="5y"):
                 prices = data["Adj Close"]
             else:
                 return pd.DataFrame()
-
         else:
             if "Close" not in data.columns:
                 return pd.DataFrame()
@@ -363,10 +336,9 @@ def fetch_from_yahoo(tickers, period="5y"):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_market_data(tickers, period="5y"):
     """
-    Primary data source: Zerodha Kite Connect.
-
-    Secondary data source: Yahoo Finance for any symbols that
-    Zerodha cannot provide.
+    Data priority:
+    1. Zerodha
+    2. Yahoo Finance fallback
     """
     requested = _clean_tickers(tickers)
 
@@ -388,10 +360,8 @@ def fetch_market_data(tickers, period="5y"):
 
     if zerodha_prices.empty:
         combined = yahoo_prices
-
     elif yahoo_prices.empty:
         combined = zerodha_prices
-
     else:
         combined = pd.concat(
             [zerodha_prices, yahoo_prices],
@@ -411,7 +381,6 @@ def fetch_market_data(tickers, period="5y"):
 # ==========================================
 def _create_nse_session():
     session = requests.Session()
-
     session.headers.update(
         {
             "User-Agent": (
@@ -423,7 +392,6 @@ def _create_nse_session():
             "Origin": "https://www.nseindia.com",
         }
     )
-
     return session
 
 
@@ -474,15 +442,6 @@ def _normalise_etf_symbol(symbol):
 
 
 def classify_etf(name, symbol):
-    """
-    Classification:
-    - Defensive ETFs
-    - International ETFs
-    - Domestic ETFs
-
-    ETFs that are not clearly defensive or international are
-    classified as domestic.
-    """
     text = f"{name} {symbol}".upper()
     text = re.sub(r"[^A-Z0-9]+", " ", text)
 
@@ -529,16 +488,10 @@ def classify_etf(name, symbol):
         "NYSE",
     ]
 
-    if any(
-        term in text
-        for term in defensive_terms
-    ):
+    if any(term in text for term in defensive_terms):
         return "Defensive ETFs"
 
-    if any(
-        term in text
-        for term in international_terms
-    ):
+    if any(term in text for term in international_terms):
         return "International ETFs"
 
     return "Domestic ETFs"
@@ -546,19 +499,9 @@ def classify_etf(name, symbol):
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def load_nse_etf_catalog():
-    """
-    Load the complete ETF list from NSE.
-
-    The result is cached for 24 hours.
-    """
     try:
         session = _create_nse_session()
-
-        # NSE generally requires this initial request.
-        session.get(
-            NSE_HOME_URL,
-            timeout=15,
-        )
+        session.get(NSE_HOME_URL, timeout=15)
 
         response = session.get(
             NSE_ETF_URL,
@@ -618,16 +561,12 @@ def load_nse_etf_catalog():
     except Exception:
         pass
 
-    # Emergency fallback if NSE is unavailable.
     return pd.DataFrame(
         [
             {
                 "symbol": ticker,
                 "name": "",
-                "group": classify_etf(
-                    "",
-                    ticker,
-                ),
+                "group": classify_etf("", ticker),
             }
             for ticker in ETF_FALLBACK_TICKERS
         ]
@@ -682,7 +621,6 @@ def get_etf_group_catalog(group=None):
     return catalog
 
 
-# Legacy groups are retained for existing strategies.
 ASSET_GROUPS_MAPPING = {
     "Defensive ETFs": get_etf_tickers("Defensive ETFs"),
     "Domestic ETFs": get_etf_tickers("Domestic ETFs"),
@@ -727,132 +665,7 @@ if not ASSET_GROUPS_MAPPING["Gov Bond"]:
 
 
 # ==========================================
-# DATASET LOADER
-# ==========================================
-@st.cache_data(ttl=86400)
-def load_historical_release_dataset():
-    try:
-        df = pd.read_parquet(DATA_URL_PARQUET)
-        df.index = pd.to_datetime(df.index)
-        return df
-
-    except Exception:
-        try:
-            return pd.read_csv(
-                DATA_URL_CSV,
-                compression="gzip",
-                index_col=0,
-                parse_dates=True,
-            )
-
-        except Exception:
-            return pd.DataFrame()
-
-
-@st.cache_data(ttl=86400)
-def get_trusted_tickers_by_group(groups):
-    tickers = []
-
-    if (
-        "Nifty 500" in groups
-        or "Nifty 200" in groups
-    ):
-        official_url = (
-            "https://niftyindices.com/IndexConstituent/"
-            "ind_nifty500list.csv"
-        )
-
-        session = requests.Session()
-        session.headers.update(
-            {"User-Agent": "Mozilla/5.0"}
-        )
-
-        try:
-            response = session.get(
-                official_url,
-                timeout=10,
-            )
-
-            if response.status_code == 200:
-                df = pd.read_csv(
-                    io.StringIO(response.text)
-                )
-
-                if "Symbol" in df.columns:
-                    n500 = [
-                        f"{str(sym).strip()}.NS"
-                        for sym in df["Symbol"]
-                        .dropna()
-                        .unique()
-                    ]
-
-                    if (
-                        "Nifty 200" in groups
-                        and "Nifty 500" not in groups
-                    ):
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
-
-        except Exception:
-            try:
-                mirror_url = (
-                    "https://raw.githubusercontent.com/"
-                    "indian-stock-market/"
-                    "nifty-500-constituents/"
-                    "main/nifty500.csv"
-                )
-
-                df = pd.read_csv(mirror_url)
-
-                if "Symbol" in df.columns:
-                    tickers.extend(
-                        [
-                            f"{str(sym).strip()}.NS"
-                            for sym in df["Symbol"]
-                            .dropna()
-                            .unique()
-                        ]
-                    )
-
-            except Exception:
-                tickers.extend(
-                    [
-                        "RELIANCE.NS",
-                        "TCS.NS",
-                        "INFY.NS",
-                        "HDFCBANK.NS",
-                        "ICICIBANK.NS",
-                        "LT.NS",
-                        "SBIN.NS",
-                    ]
-                )
-
-    for group in groups:
-        if group in ETF_GROUP_NAMES:
-            tickers.extend(
-                get_etf_tickers(group)
-            )
-
-        elif group in ASSET_GROUPS_MAPPING:
-            tickers.extend(
-                ASSET_GROUPS_MAPPING[group]
-            )
-
-    if not tickers:
-        tickers = [
-            "RELIANCE.NS",
-            "TCS.NS",
-            "INFY.NS",
-            "HDFCBANK.NS",
-            "ICICIBANK.NS",
-        ]
-
-    return sorted(set(tickers))
-
-
-# ==========================================
-# MOMENTUM AND BACKTEST ENGINE
+# MOMENTUM / RANKING ENGINE
 # ==========================================
 def calculate_simple_momentum(
     price_df,
@@ -862,8 +675,7 @@ def calculate_simple_momentum(
         return pd.Series(dtype=float)
 
     return (
-        price_df.iloc[-1]
-        / price_df.iloc[-lookback_days]
+        price_df.iloc[-1] / price_df.iloc[-lookback_days]
     ) - 1.0
 
 
@@ -934,6 +746,98 @@ def get_momentum_scores(
     )
 
 
+def get_defensive_etf_tickers():
+    tickers = []
+
+    tickers.extend(
+        ASSET_GROUPS_MAPPING.get("LiquidBEES", [])
+    )
+
+    tickers.extend(
+        ASSET_GROUPS_MAPPING.get("Gov Bond", [])
+    )
+
+    return list(dict.fromkeys(tickers))
+
+
+def rank_defensive_etfs_with_multipliers(
+    prices_df,
+    target_count,
+    lookback_days=126,
+):
+    """
+    Rank only LiquidBEES and G-Sec ETFs using 3x, 2x and 1x
+    momentum scores, for ranking only.
+
+    Example:
+      6% return -> 1x = 6%, 2x = 12%, 3x = 18%
+    """
+    defensive_tickers = get_defensive_etf_tickers()
+
+    available = [
+        ticker
+        for ticker in defensive_tickers
+        if ticker in prices_df.columns
+    ]
+
+    if not available:
+        return []
+
+    defensive_prices = prices_df[available].copy()
+
+    raw_returns = calculate_simple_momentum(
+        defensive_prices,
+        lookback_days=lookback_days,
+    )
+
+    if raw_returns.empty:
+        return []
+
+    raw_returns = raw_returns.dropna()
+
+    candidates = []
+
+    for multiplier in [3, 2, 1]:
+        for ticker in raw_returns.index:
+            raw_return = float(raw_returns[ticker])
+            adjusted_return = raw_return * multiplier
+
+            candidates.append(
+                {
+                    "Symbol": ticker,
+                    "Multiplier": multiplier,
+                    "Raw Return": raw_return,
+                    "Adjusted Return": adjusted_return,
+                }
+            )
+
+    # Higher multiplier first, then higher adjusted return.
+    candidates.sort(
+        key=lambda row: (
+            row["Multiplier"],
+            row["Adjusted Return"],
+        ),
+        reverse=True,
+    )
+
+    selected = []
+    seen = set()
+
+    for candidate in candidates:
+        symbol = candidate["Symbol"]
+
+        if symbol in seen:
+            continue
+
+        seen.add(symbol)
+        selected.append(candidate)
+
+        if len(selected) >= target_count:
+            break
+
+    return selected
+
+
 def is_regime_bullish(
     benchmark_series,
     current_date,
@@ -957,10 +861,9 @@ def apply_rank_buffering(
 
     for stock in current_holdings:
         if stock in ranked_candidates:
-            rank = ranked_candidates.index(stock) + 1
-
+            stock_rank = ranked_candidates.index(stock) + 1
             if (
-                rank <= buffer_rank
+                stock_rank <= buffer_rank
                 and len(new_portfolio) < target_size
             ):
                 new_portfolio.append(stock)
@@ -975,6 +878,271 @@ def apply_rank_buffering(
     return new_portfolio
 
 
+def run_backtest_simulation(
+    strat_config,
+    initial_capital,
+    start_date,
+    end_date,
+    price_df=None,
+    benchmark_series=None,
+    signal_type="Simple Momentum",
+    use_regime_filter=True,
+    use_rank_buffer=True,
+    buffer_threshold=20,
+):
+    if price_df is None or price_df.empty:
+        groups = strat_config.get(
+            "groups",
+            ["Nifty 500"],
+        )
+
+        tickers = get_trusted_tickers_by_group(groups)
+        price_df = fetch_market_data(
+            tickers,
+            period="5y",
+        )
+
+    sub_prices = price_df.loc[start_date:end_date]
+
+    if len(sub_prices) < 252:
+        return None
+
+    try:
+        rebalance_dates = (
+            sub_prices
+            .resample("ME")
+            .first()
+            .index
+        )
+    except ValueError:
+        rebalance_dates = (
+            sub_prices
+            .resample("MS")
+            .first()
+            .index
+        )
+
+    portfolio_history = []
+    current_cash = initial_capital
+    current_holdings = {}
+
+    multiplier = strat_config.get(
+        "allocation_multiplier",
+        1.0,
+    )
+
+    for i in range(len(rebalance_dates) - 1):
+        current_date = rebalance_dates[i]
+        history = sub_prices.loc[:current_date]
+
+        if len(history) < 126:
+            continue
+
+        regime_ok = True
+
+        if (
+            use_regime_filter
+            and benchmark_series is not None
+        ):
+            regime_ok = is_regime_bullish(
+                benchmark_series,
+                current_date,
+                sma_period=200,
+            )
+
+        total_value = current_cash
+
+        for symbol, quantity in current_holdings.items():
+            if (
+                symbol in history.columns
+                and not np.isnan(
+                    history[symbol].iloc[-1]
+                )
+            ):
+                total_value += (
+                    quantity * history[symbol].iloc[-1]
+                )
+
+        ranking_prices = history.drop(
+            columns=[
+                NIFTY_REGIME_TICKER,
+                GSEC_REGIME_TICKER,
+            ],
+            errors="ignore",
+        )
+
+        scores = get_momentum_scores(
+            ranking_prices,
+            signal_type=signal_type,
+            lookback_days=126,
+        )
+
+        ranked_stocks = (
+            scores
+            .sort_values(ascending=False)
+            .dropna()
+            .index
+            .tolist()
+        )
+
+        if not regime_ok:
+            current_holdings = {}
+            current_cash = total_value
+        else:
+            top_n = strat_config.get(
+                "entry_rank",
+                10,
+            )
+
+            if use_rank_buffer and current_holdings:
+                selected_stocks = apply_rank_buffering(
+                    list(current_holdings.keys()),
+                    ranked_stocks,
+                    top_n,
+                    buffer_threshold,
+                )
+            else:
+                selected_stocks = ranked_stocks[:top_n]
+
+            if selected_stocks:
+                effective_pool = total_value * multiplier
+                allocation_per_stock = (
+                    effective_pool / len(selected_stocks)
+                )
+
+                current_holdings = {}
+                current_cash = total_value
+
+                for symbol in selected_stocks:
+                    if symbol not in history.columns:
+                        continue
+
+                    stock_price = history[symbol].iloc[-1]
+
+                    if stock_price > 0:
+                        quantity = int(
+                            allocation_per_stock // stock_price
+                        )
+
+                        if quantity > 0:
+                            current_holdings[symbol] = quantity
+                            current_cash -= (
+                                quantity * stock_price
+                            )
+
+        portfolio_history.append(
+            {
+                "Date": current_date,
+                "Portfolio Value": total_value,
+            }
+        )
+
+    if not portfolio_history:
+        return None
+
+    return pd.DataFrame(
+        portfolio_history
+    ).set_index("Date")
+
+
+# ==========================================
+# STOCK SCANNER
+# ==========================================
+@st.cache_data(ttl=86400)
+def get_trusted_tickers_by_group(groups):
+    tickers = []
+
+    if (
+        "Nifty 500" in groups
+        or "Nifty 200" in groups
+    ):
+        official_url = (
+            "https://niftyindices.com/IndexConstituent/"
+            "ind_nifty500list.csv"
+        )
+
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+
+        try:
+            response = session.get(
+                official_url,
+                timeout=10,
+            )
+
+            if response.status_code == 200:
+                df = pd.read_csv(io.StringIO(response.text))
+
+                if "Symbol" in df.columns:
+                    n500 = [
+                        f"{str(sym).strip()}.NS"
+                        for sym in df["Symbol"]
+                        .dropna()
+                        .unique()
+                    ]
+
+                    if (
+                        "Nifty 200" in groups
+                        and "Nifty 500" not in groups
+                    ):
+                        tickers.extend(n500[:200])
+                    else:
+                        tickers.extend(n500)
+        except Exception:
+            mirror_url = (
+                "https://raw.githubusercontent.com/"
+                "indian-stock-market/"
+                "nifty-500-constituents/"
+                "main/nifty500.csv"
+            )
+
+            try:
+                df = pd.read_csv(mirror_url)
+
+                if "Symbol" in df.columns:
+                    tickers.extend(
+                        [
+                            f"{str(sym).strip()}.NS"
+                            for sym in df["Symbol"]
+                            .dropna()
+                            .unique()
+                        ]
+                    )
+            except Exception:
+                tickers.extend(
+                    [
+                        "RELIANCE.NS",
+                        "TCS.NS",
+                        "INFY.NS",
+                        "HDFCBANK.NS",
+                        "ICICIBANK.NS",
+                        "LT.NS",
+                        "SBIN.NS",
+                    ]
+                )
+
+    for group in groups:
+        if group in ETF_GROUP_NAMES:
+            tickers.extend(
+                get_etf_tickers(group)
+            )
+        elif group in ASSET_GROUPS_MAPPING:
+            tickers.extend(
+                ASSET_GROUPS_MAPPING[group]
+            )
+
+    if not tickers:
+        tickers = [
+            "RELIANCE.NS",
+            "TCS.NS",
+            "INFY.NS",
+            "HDFCBANK.NS",
+            "ICICIBANK.NS",
+        ]
+
+    return sorted(set(tickers))
+
+
 def run_strategy_stock_scanner(
     strat,
     price_subset=None,
@@ -985,10 +1153,8 @@ def run_strategy_stock_scanner(
     )
 
     if price_subset is None:
-        group_tickers = (
-            get_trusted_tickers_by_group(
-                selected_groups
-            )
+        group_tickers = get_trusted_tickers_by_group(
+            selected_groups
         )
 
         group_tickers.extend(
@@ -1002,7 +1168,6 @@ def run_strategy_stock_scanner(
             group_tickers,
             period="2y",
         )
-
     else:
         prices_df = price_subset
 
@@ -1051,18 +1216,10 @@ def run_strategy_stock_scanner(
             ],
         ]
 
-    pct_high = strat.get(
-        "pct_from_high",
-        15.0,
-    )
+    pct_high = strat.get("pct_from_high", 15.0)
 
     if pct_high > 0 and len(filtered_df) >= 252:
-        period_high = (
-            filtered_df
-            .iloc[-252:]
-            .max()
-        )
-
+        period_high = filtered_df.iloc[-252:].max()
         pct_diff = (
             (period_high - latest_prices)
             / period_high
@@ -1088,41 +1245,58 @@ def run_strategy_stock_scanner(
                 / prices_df[GSEC_REGIME_TICKER]
             )
 
-            rs_sma = rs_ratio.rolling(
-                window=50
-            ).mean()
+            rs_sma = rs_ratio.rolling(window=50).mean()
 
-            if (
-                not rs_sma.empty
-                and rs_ratio.iloc[-1] < rs_sma.iloc[-1]
-            ):
-                return [
-                    ASSET_GROUPS_MAPPING[
-                        "Gov Bond"
-                    ][0]
-                ]
+            if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
+                return [ASSET_GROUPS_MAPPING["Gov Bond"][0]]
 
-    # Do not rank regime benchmarks.
-    excluded = [
-        NIFTY_REGIME_TICKER,
-        GSEC_REGIME_TICKER,
-    ]
+    # Special defensive ETF ranking: LiquidBEES and G-Sec only.
+    target_count = strat.get("entry_rank", 10)
+    selected_groups = strat.get("groups", [])
 
+    defensive_groups_selected = any(
+        group in selected_groups
+        for group in [
+            "LiquidBEES",
+            "Gov Bond",
+            "Defensive ETFs",
+        ]
+    )
+
+    if defensive_groups_selected:
+        defensive_results = rank_defensive_etfs_with_multipliers(
+            prices_df=filtered_df,
+            target_count=target_count,
+            lookback_days=126,
+        )
+
+        st.session_state["last_defensive_ranking"] = (
+            defensive_results
+        )
+
+        if defensive_results:
+            return [
+                result["Symbol"]
+                for result in defensive_results
+            ]
+
+    # Standard logic for non-defensive universe.
     filtered_df = filtered_df.drop(
         columns=[
-            column
-            for column in excluded
-            if column in filtered_df.columns
+            NIFTY_REGIME_TICKER,
+            GSEC_REGIME_TICKER,
         ],
         errors="ignore",
     )
 
+    signal_model = strat.get(
+        "signal_type",
+        "Simple Momentum",
+    )
+
     scores = get_momentum_scores(
         filtered_df,
-        signal_type=strat.get(
-            "signal_type",
-            "Simple Momentum",
-        ),
+        signal_type=signal_model,
         lookback_days=126,
     )
 
@@ -1134,240 +1308,7 @@ def run_strategy_stock_scanner(
         .tolist()
     )
 
-    return ranked[
-        : strat.get("entry_rank", 10)
-    ]
-
-
-def run_backtest_simulation(
-    strat_config,
-    initial_capital,
-    start_date,
-    end_date,
-    price_df=None,
-    benchmark_series=None,
-    signal_type="Simple Momentum",
-    use_regime_filter=True,
-    use_rank_buffer=True,
-    buffer_threshold=20,
-):
-    if price_df is None or price_df.empty:
-        groups = strat_config.get(
-            "groups",
-            ["Nifty 500"],
-        )
-
-        tickers = get_trusted_tickers_by_group(
-            groups
-        )
-
-        price_df = fetch_market_data(
-            tickers,
-            period="5y",
-        )
-
-    sub_prices = price_df.loc[
-        start_date:end_date
-    ]
-
-    if len(sub_prices) < 252:
-        return None
-
-    try:
-        rebalance_dates = (
-            sub_prices
-            .resample("ME")
-            .first()
-            .index
-        )
-
-    except ValueError:
-        rebalance_dates = (
-            sub_prices
-            .resample("MS")
-            .first()
-            .index
-        )
-
-    portfolio_history = []
-    current_cash = initial_capital
-    current_holdings = {}
-
-    multiplier = strat_config.get(
-        "allocation_multiplier",
-        1.0,
-    )
-
-    for i in range(len(rebalance_dates) - 1):
-        current_date = rebalance_dates[i]
-        history = sub_prices.loc[:current_date]
-
-        if len(history) < 126:
-            continue
-
-        regime_ok = True
-
-        if (
-            use_regime_filter
-            and benchmark_series is not None
-        ):
-            regime_ok = is_regime_bullish(
-                benchmark_series,
-                current_date,
-                sma_period=200,
-            )
-
-        total_value = current_cash
-
-        for symbol, quantity in current_holdings.items():
-            if (
-                symbol in history.columns
-                and not np.isnan(
-                    history[symbol].iloc[-1]
-                )
-            ):
-                total_value += (
-                    quantity
-                    * history[symbol].iloc[-1]
-                )
-
-        ranking_prices = history.drop(
-            columns=[
-                NIFTY_REGIME_TICKER,
-                GSEC_REGIME_TICKER,
-            ],
-            errors="ignore",
-        )
-
-        scores = get_momentum_scores(
-            ranking_prices,
-            signal_type=signal_type,
-            lookback_days=126,
-        )
-
-        ranked_stocks = (
-            scores
-            .sort_values(ascending=False)
-            .dropna()
-            .index
-            .tolist()
-        )
-
-        if not regime_ok:
-            current_holdings = {}
-            current_cash = total_value
-
-        else:
-            top_n = strat_config.get(
-                "entry_rank",
-                10,
-            )
-
-            if use_rank_buffer and current_holdings:
-                selected_stocks = apply_rank_buffering(
-                    list(current_holdings.keys()),
-                    ranked_stocks,
-                    top_n,
-                    buffer_threshold,
-                )
-            else:
-                selected_stocks = ranked_stocks[:top_n]
-
-            if selected_stocks:
-                effective_pool = (
-                    total_value * multiplier
-                )
-
-                allocation_per_stock = (
-                    effective_pool
-                    / len(selected_stocks)
-                )
-
-                current_holdings = {}
-                current_cash = total_value
-
-                for symbol in selected_stocks:
-                    if symbol not in history.columns:
-                        continue
-
-                    stock_price = history[
-                        symbol
-                    ].iloc[-1]
-
-                    if stock_price > 0:
-                        quantity = int(
-                            allocation_per_stock
-                            // stock_price
-                        )
-
-                        if quantity > 0:
-                            current_holdings[
-                                symbol
-                            ] = quantity
-
-                            current_cash -= (
-                                quantity
-                                * stock_price
-                            )
-
-        portfolio_history.append(
-            {
-                "Date": current_date,
-                "Portfolio Value": total_value,
-            }
-        )
-
-    if not portfolio_history:
-        return None
-
-    return pd.DataFrame(
-        portfolio_history
-    ).set_index("Date")
-
-
-# ==========================================
-# STATE INITIALIZATION
-# ==========================================
-if "navigation_tab" not in st.session_state:
-    st.session_state.navigation_tab = "DASHBOARD"
-
-if "active_strategy_view" not in st.session_state:
-    st.session_state.active_strategy_view = None
-
-if "editing_strategy_name" not in st.session_state:
-    st.session_state.editing_strategy_name = None
-
-if "strategies" not in st.session_state:
-    st.session_state.strategies = {
-        "Alpha Momentum Multiplier": {
-            "created_date": (
-                datetime.now()
-                - timedelta(days=43)
-            ).strftime("%Y-%m-%d"),
-            "status": "Active",
-            "type": "Real",
-            "allocated": 100000.0,
-            "realized_pnl": 0.0,
-            "rebalance_freq": "Monthly",
-            "rebalance_day": 1,
-            "groups": [
-                "Nifty 500",
-                "Defensive ETFs",
-            ],
-            "allocation_multiplier": 1.0,
-            "entry_rank": 10,
-            "exit_rank": 20,
-            "pct_from_high": 15.0,
-            "pct_from_low": 0.0,
-            "moving_average": "200 EMA",
-            "use_rs": True,
-            "rs_benchmark": "Nifty 500 / G-Sec",
-            "signal_type": "Simple Momentum",
-            "use_regime_filter": True,
-            "use_rank_buffer": True,
-            "positions": [],
-        }
-    }
+    return ranked[:target_count]
 
 
 # ==========================================
@@ -1401,12 +1342,9 @@ def calculate_days_to_rebalance(rebalance_day):
 
 def calculate_strategy_metrics(strat):
     positions = strat.get("positions", [])
-    realized_pnl = strat.get(
-        "realized_pnl",
-        0.0,
-    )
-
+    realized_pnl = strat.get("realized_pnl", 0.0)
     allocated = strat["allocated"]
+
     unrealized_pnl = 0.0
     current_holding_value = 0.0
     total_cost_basis = 0.0
@@ -1457,37 +1395,19 @@ def calculate_strategy_metrics(strat):
 
             positions_data.append(
                 {
-                    "Symbol": symbol.replace(
-                        ".NS",
-                        "",
-                    ),
+                    "Symbol": symbol.replace(".NS", ""),
                     "Buy Qty": quantity,
-                    "Buy Price": (
-                        f"₹{buy_price:,.2f}"
-                    ),
-                    "Entry Date": position[
-                        "Entry Date"
-                    ],
-                    "CMP": (
-                        f"₹{current_price:,.2f}"
-                    ),
-                    "Current Value": (
-                        f"₹{current_value:,.2f}"
-                    ),
-                    "Current P&L": (
-                        f"₹{position_pnl:,.2f}"
-                    ),
-                    "Current P&L %": (
-                        f"{position_pnl_pct:.2f}%"
-                    ),
+                    "Buy Price": f"₹{buy_price:,.2f}",
+                    "Entry Date": position["Entry Date"],
+                    "CMP": f"₹{current_price:,.2f}",
+                    "Current Value": f"₹{current_value:,.2f}",
+                    "Current P&L": f"₹{position_pnl:,.2f}",
+                    "Current P&L %": f"{position_pnl_pct:.2f}%",
                 }
             )
 
     cash_reserve = (
-        max(
-            0.0,
-            allocated - total_cost_basis,
-        )
+        max(0.0, allocated - total_cost_basis)
         if total_cost_basis > 0
         else allocated
     )
@@ -1501,9 +1421,7 @@ def calculate_strategy_metrics(strat):
     )
 
     current_total_value = (
-        cash_reserve
-        + current_holding_value
-        + realized_pnl
+        cash_reserve + current_holding_value + realized_pnl
     )
 
     return {
@@ -1520,26 +1438,71 @@ def calculate_strategy_metrics(strat):
 
 
 # ==========================================
-# NAVIGATION HEADER
+# STATE INITIALIZATION
 # ==========================================
-provider = (
+if "navigation_tab" not in st.session_state:
+    st.session_state.navigation_tab = "DASHBOARD"
+
+if "active_strategy_view" not in st.session_state:
+    st.session_state.active_strategy_view = None
+
+if "editing_strategy_name" not in st.session_state:
+    st.session_state.editing_strategy_name = None
+
+if "strategies" not in st.session_state:
+    st.session_state.strategies = {
+        "Alpha Momentum Multiplier": {
+            "created_date": (
+                datetime.now() - timedelta(days=43)
+            ).strftime("%Y-%m-%d"),
+            "status": "Active",
+            "type": "Real",
+            "allocated": 100000.0,
+            "realized_pnl": 0.0,
+            "rebalance_freq": "Monthly",
+            "rebalance_day": 1,
+            "groups": [
+                "Nifty 500",
+                "Defensive ETFs",
+            ],
+            "allocation_multiplier": 1.0,
+            "entry_rank": 10,
+            "exit_rank": 20,
+            "pct_from_high": 15.0,
+            "pct_from_low": 0.0,
+            "moving_average": "200 EMA",
+            "use_rs": True,
+            "rs_benchmark": "Nifty 500 / G-Sec",
+            "signal_type": "Simple Momentum",
+            "use_regime_filter": True,
+            "use_rank_buffer": True,
+            "positions": [],
+        }
+    }
+
+
+# ==========================================
+# SIDEBAR DATA PROVIDER STATUS
+# ==========================================
+primary_provider = (
     "Zerodha Kite Connect"
     if get_kite_client() is not None
     else "Yahoo Finance fallback"
 )
 
-if provider == "Zerodha Kite Connect":
-    st.sidebar.success(
-        "Primary data: Zerodha Kite"
-    )
+if primary_provider == "Zerodha Kite Connect":
+    st.sidebar.success("Primary data: Zerodha Kite")
 else:
-    st.sidebar.warning(
-        "Zerodha unavailable"
-    )
-    st.sidebar.info(
-        "Using Yahoo Finance fallback"
-    )
+    st.sidebar.warning("Zerodha unavailable")
+    st.sidebar.info("Using Yahoo Finance fallback")
 
+if st.session_state.get("kite_error"):
+    st.sidebar.code(st.session_state["kite_error"])
+
+
+# ==========================================
+# NAVIGATION HEADER
+# ==========================================
 nav_col1, nav_col2, nav_col3, _ = st.columns(
     [1.5, 2, 1.5, 3]
 )
@@ -1550,8 +1513,7 @@ with nav_col1:
         use_container_width=True,
         type=(
             "primary"
-            if st.session_state.navigation_tab
-            == "DASHBOARD"
+            if st.session_state.navigation_tab == "DASHBOARD"
             else "secondary"
         ),
     ):
@@ -1565,8 +1527,7 @@ with nav_col2:
         use_container_width=True,
         type=(
             "primary"
-            if st.session_state.navigation_tab
-            == "STRATEGY_BUILDER"
+            if st.session_state.navigation_tab == "STRATEGY_BUILDER"
             else "secondary"
         ),
     ):
@@ -1580,8 +1541,7 @@ with nav_col3:
         use_container_width=True,
         type=(
             "primary"
-            if st.session_state.navigation_tab
-            == "BACKTEST"
+            if st.session_state.navigation_tab == "BACKTEST"
             else "secondary"
         ),
     ):
@@ -1595,25 +1555,20 @@ st.markdown("---")
 # DASHBOARD
 # ==========================================
 if st.session_state.navigation_tab == "DASHBOARD":
-
     if st.session_state.active_strategy_view is not None:
-        strategy_name = (
-            st.session_state.active_strategy_view
-        )
-
-        strat = st.session_state.strategies.get(
-            strategy_name
-        )
+        strat_name = st.session_state.active_strategy_view
+        strat = st.session_state.strategies.get(strat_name)
 
         if not strat:
             st.session_state.active_strategy_view = None
             st.rerun()
 
         metrics = calculate_strategy_metrics(strat)
-
-        top_col1, _, top_col3 = st.columns(
-            [2, 5, 3]
+        days_left = calculate_days_to_rebalance(
+            strat.get("rebalance_day", 1)
         )
+
+        top_col1, _, top_col3 = st.columns([2, 5, 3])
 
         with top_col1:
             if st.button("❮ Back to Dashboard"):
@@ -1622,7 +1577,6 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         with top_col3:
             current_status = strat["status"]
-
             button_label = (
                 "⏸️ Pause Strategy"
                 if current_status == "Active"
@@ -1637,9 +1591,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
                 )
                 st.rerun()
 
-        st.subheader(
-            f"Strategy: {strategy_name}"
-        )
+        st.subheader(f"Strategy: {strat_name}")
 
         status_class = (
             "status-active"
@@ -1649,178 +1601,102 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         st.markdown(
             f"Status: <span class='{status_class}'>"
-            f"{strat['status']}</span> | "
-            f"**Groups:** "
+            f"{strat['status']}</span> | **Groups:** "
             f"{', '.join(strat.get('groups', []))} | "
-            f"**Multiplier:** "
-            f"{strat.get('allocation_multiplier', 1.0)}x",
+            f"**Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | "
+            f"**Rebalance Day:** {strat.get('rebalance_day', 1)} | "
+            f"**Days left:** {days_left}",
             unsafe_allow_html=True,
         )
 
         m1, m2, m3, m4 = st.columns(4)
 
-        m1.metric(
-            "Allocated Capital",
-            f"₹{metrics['allocated']:,.2f}",
-        )
-
-        m2.metric(
-            "Uninvested Cash",
-            f"₹{metrics['cash_reserve']:,.2f}",
-        )
-
-        m3.metric(
-            "Unrealized P&L",
-            f"₹{metrics['unrealized_pnl']:,.2f}",
-        )
-
-        m4.metric(
-            "Total P&L & Returns",
-            f"₹{metrics['total_pnl']:,.2f}",
-            delta=f"{metrics['returns_pct']:.2f}%",
-        )
+        m1.metric("Allocated Capital", f"₹{metrics['allocated']:,.2f}")
+        m2.metric("Uninvested Cash", f"₹{metrics['cash_reserve']:,.2f}")
+        m3.metric("Unrealized P&L", f"₹{metrics['unrealized_pnl']:,.2f}")
+        m4.metric("Total P&L & Returns", f"₹{metrics['total_pnl']:,.2f}", delta=f"{metrics['returns_pct']:.2f}%")
 
         st.markdown("---")
-        st.subheader(
-            "🔍 Live Stock Scanner & Rebalance Engine"
-        )
+        st.subheader("🔍 Live Stock Scanner & Rebalance Engine")
 
         if st.button(
             "🚀 Run Live Stock Scan for this Strategy",
             type="primary",
             use_container_width=True,
         ):
-            with st.spinner(
-                "Fetching data and running scanner..."
-            ):
-                scanned = run_strategy_stock_scanner(
-                    strat
-                )
+            with st.spinner("Running scanner..."):
+                scanned = run_strategy_stock_scanner(strat)
+                st.session_state[f"scanned_results_{strat_name}"] = scanned
 
-                st.session_state[
-                    f"scanned_results_{strategy_name}"
-                ] = scanned
-
-        scanned_results = st.session_state.get(
-            f"scanned_results_{strategy_name}"
-        )
+        scanned_results = st.session_state.get(f"scanned_results_{strat_name}")
 
         if scanned_results is not None:
-            st.success(
-                f"Scan complete. Found "
-                f"**{len(scanned_results)}** targets."
-            )
+            st.success(f"Scan complete. Found **{len(scanned_results)}** target assets.")
 
-            scan_col1, scan_col2 = st.columns(2)
+            sc_col1, sc_col2 = st.columns(2)
 
-            with scan_col1:
-                st.markdown(
-                    "#### 📌 Current Holdings"
-                )
-
+            with sc_col1:
+                st.markdown("#### 📌 Current Holdings")
                 if metrics["positions_data"]:
-                    st.dataframe(
-                        pd.DataFrame(
-                            metrics["positions_data"]
-                        ),
-                        use_container_width=True,
-                    )
+                    st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
                 else:
-                    st.info(
-                        "No active holdings."
-                    )
+                    st.info("No active holdings.")
 
-            with scan_col2:
-                st.markdown(
-                    "#### 🔄 Scanned Portfolio"
-                )
+            with sc_col2:
+                st.markdown("#### 🔄 Scanned Portfolio")
+                prices_df = fetch_market_data(scanned_results, period="5d")
 
-                prices_df = fetch_market_data(
-                    scanned_results,
-                    period="5d",
-                )
-
-                scanned_rows = []
+                rows = []
 
                 for ticker in scanned_results:
-                    if (
-                        not prices_df.empty
-                        and ticker in prices_df.columns
-                    ):
-                        current_price = float(
-                            prices_df[ticker]
-                            .dropna()
-                            .iloc[-1]
-                        )
+                    if not prices_df.empty and ticker in prices_df.columns:
+                        current_price = float(prices_df[ticker].dropna().iloc[-1])
                     else:
                         current_price = 0.0
 
-                    scanned_rows.append(
+                    rows.append(
                         {
-                            "Symbol": ticker.replace(
-                                ".NS",
-                                "",
-                            ),
-                            "CMP": (
-                                f"₹{current_price:,.2f}"
-                            ),
+                            "Symbol": ticker.replace(".NS", ""),
+                            "CMP": f"₹{current_price:,.2f}",
                             "Status": "Entry Target",
                         }
                     )
 
-                st.dataframe(
-                    pd.DataFrame(scanned_rows),
-                    use_container_width=True,
-                )
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-            if st.button(
-                "⚡ Execute Rebalance & Reinvest Capital",
-                type="primary",
-                use_container_width=True,
-            ):
-                reinvest_pool = (
-                    metrics["current_total_value"]
-                    * strat.get(
-                        "allocation_multiplier",
-                        1.0,
+            defensive_ranking = st.session_state.get("last_defensive_ranking", [])
+
+            if defensive_ranking:
+                st.markdown("#### Defensive ETF Ranking Details")
+
+                ranking_rows = []
+
+                for result in defensive_ranking:
+                    ranking_rows.append(
+                        {
+                            "Symbol": result["Symbol"].replace(".NS", ""),
+                            "Raw Return": f"{result['Raw Return'] * 100:.2f}%",
+                            "Ranking Multiplier": f"{result['Multiplier']}x",
+                            "Adjusted Return": f"{result['Adjusted Return'] * 100:.2f}%",
+                        }
                     )
-                )
 
-                allocation_per_stock = (
-                    reinvest_pool
-                    / len(scanned_results)
-                    if scanned_results
-                    else 0.0
-                )
+                st.dataframe(pd.DataFrame(ranking_rows), use_container_width=True)
 
-                prices_df = fetch_market_data(
-                    scanned_results,
-                    period="5d",
-                )
+            if st.button("⚡ Execute Rebalance & Reinvest Capital", type="primary", use_container_width=True):
+                reinvest_pool = metrics["current_total_value"] * strat.get("allocation_multiplier", 1.0)
+                allocation_per_stock = reinvest_pool / len(scanned_results) if scanned_results else 0.0
 
+                prices_df = fetch_market_data(scanned_results, period="5d")
                 new_positions = []
 
                 for ticker in scanned_results:
-                    if (
-                        not prices_df.empty
-                        and ticker in prices_df.columns
-                    ):
-                        current_price = float(
-                            prices_df[ticker]
-                            .dropna()
-                            .iloc[-1]
-                        )
+                    if not prices_df.empty and ticker in prices_df.columns:
+                        current_price = float(prices_df[ticker].dropna().iloc[-1])
                     else:
                         current_price = 0.0
 
-                    quantity = (
-                        int(
-                            allocation_per_stock
-                            // current_price
-                        )
-                        if current_price > 0
-                        else 0
-                    )
+                    quantity = int(allocation_per_stock // current_price) if current_price > 0 else 0
 
                     if quantity > 0:
                         new_positions.append(
@@ -1828,47 +1704,22 @@ if st.session_state.navigation_tab == "DASHBOARD":
                                 "Symbol": ticker,
                                 "Buy Qty": quantity,
                                 "Buy Price": current_price,
-                                "Entry Date": (
-                                    datetime.now()
-                                    .strftime(
-                                        "%Y-%m-%d"
-                                    )
-                                ),
+                                "Entry Date": datetime.now().strftime("%Y-%m-%d"),
                             }
                         )
 
                 strat["positions"] = new_positions
-                strat["realized_pnl"] = metrics[
-                    "total_pnl"
-                ]
-
-                st.session_state[
-                    f"scanned_results_{strategy_name}"
-                ] = None
-
-                st.success(
-                    f"Rebalanced across "
-                    f"{len(new_positions)} assets."
-                )
-
+                strat["realized_pnl"] = metrics["total_pnl"]
+                st.session_state[f"scanned_results_{strat_name}"] = None
+                st.success(f"Rebalanced across {len(new_positions)} assets.")
                 st.rerun()
 
         else:
-            st.markdown(
-                "#### 📋 Current Portfolio Holdings"
-            )
-
+            st.markdown("#### 📋 Current Holdings")
             if metrics["positions_data"]:
-                st.dataframe(
-                    pd.DataFrame(
-                        metrics["positions_data"]
-                    ),
-                    use_container_width=True,
-                )
+                st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
             else:
-                st.info(
-                    "No active holdings. Run the scanner."
-                )
+                st.info("No active holdings. Run the scanner.")
 
     else:
         st.title("MY PORTFOLIO")
@@ -1878,185 +1729,85 @@ if st.session_state.navigation_tab == "DASHBOARD":
         total_realized_pnl = 0.0
         total_unrealized_pnl = 0.0
 
-        for strat in st.session_state.strategies.values():
-            metric = calculate_strategy_metrics(strat)
+        for strategy in st.session_state.strategies.values():
+            metrics = calculate_strategy_metrics(strategy)
+            total_allocated += metrics["allocated"]
+            total_holding_value += metrics["current_holding_val"]
+            total_realized_pnl += metrics["realized_pnl"]
+            total_unrealized_pnl += metrics["unrealized_pnl"]
 
-            total_allocated += metric["allocated"]
-            total_holding_value += metric[
-                "current_holding_val"
-            ]
-            total_realized_pnl += metric[
-                "realized_pnl"
-            ]
-            total_unrealized_pnl += metric[
-                "unrealized_pnl"
-            ]
+        total_pnl = total_realized_pnl + total_unrealized_pnl
 
-        total_pnl = (
-            total_realized_pnl
-            + total_unrealized_pnl
-        )
-
-        total_return = (
+        total_return_pct = (
             total_pnl / total_allocated * 100
             if total_allocated > 0
             else 0.0
         )
 
-        total_portfolio_value = (
-            total_allocated + total_pnl
-        )
+        total_portfolio_value = total_allocated + total_pnl
 
         kpi1, kpi2, kpi3 = st.columns(3)
 
-        kpi1.metric(
-            "Total Allocated Capital",
-            f"₹{total_allocated:,.2f}",
-        )
-
-        kpi2.metric(
-            "Total Realized P&L",
-            f"₹{total_realized_pnl:,.2f}",
-        )
-
-        kpi3.metric(
-            "Total Portfolio P&L",
-            f"₹{total_pnl:,.2f}",
-            delta=f"{total_return:.2f}%",
-        )
+        kpi1.metric("Total Allocated Capital", f"₹{total_allocated:,.2f}")
+        kpi2.metric("Total Realized P&L", f"₹{total_realized_pnl:,.2f}")
+        kpi3.metric("Total Portfolio P&L", f"₹{total_pnl:,.2f}", delta=f"{total_return_pct:.2f}%")
 
         kpi4, kpi5, kpi6 = st.columns(3)
 
-        kpi4.metric(
-            "Current Holdings Value",
-            f"₹{total_holding_value:,.2f}",
-        )
-
-        kpi5.metric(
-            "Total Unrealized P&L",
-            f"₹{total_unrealized_pnl:,.2f}",
-        )
-
-        kpi6.metric(
-            "Total Portfolio Balance",
-            f"₹{total_portfolio_value:,.2f}",
-        )
+        kpi4.metric("Current Holdings Value", f"₹{total_holding_value:,.2f}")
+        kpi5.metric("Total Unrealized P&L", f"₹{total_unrealized_pnl:,.2f}")
+        kpi6.metric("Total Portfolio Balance", f"₹{total_portfolio_value:,.2f}")
 
         st.markdown("---")
         st.subheader("Real Strategies")
 
         strategy_columns = st.columns(3)
-        strategy_names = list(
-            st.session_state.strategies.keys()
-        )
 
-        for index, name in enumerate(strategy_names):
+        for i, name in enumerate(st.session_state.strategies.keys()):
             strat = st.session_state.strategies[name]
-            metric = calculate_strategy_metrics(strat)
-
-            column = strategy_columns[index % 3]
+            metrics = calculate_strategy_metrics(strat)
+            days_left = calculate_days_to_rebalance(strat.get("rebalance_day", 1))
+            column = strategy_columns[i % 3]
 
             with column:
                 with st.container(border=True):
-                    st.markdown(f"### **{name}**")
+                    c_head1, c_head2 = st.columns([3, 2])
 
-                    status_class = (
-                        "status-active"
-                        if strat["status"] == "Active"
-                        else "status-paused"
-                    )
+                    with c_head1:
+                        st.markdown(f"### **{name}**")
+                        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
+                        st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
 
-                    st.markdown(
-                        f"<span class='{status_class}'>"
-                        f"{strat['status']}</span>",
-                        unsafe_allow_html=True,
-                    )
+                    with c_head2:
+                        action1, action2, action3 = st.columns(3)
 
-                    action1, action2, action3 = st.columns(3)
+                        with action1:
+                            if st.button("⏸️" if strat["status"] == "Active" else "▶️", key=f"toggle_{name}"):
+                                strat["status"] = "Paused" if strat["status"] == "Active" else "Active"
+                                st.rerun()
 
-                    with action1:
-                        if st.button(
-                            "⏸️"
-                            if strat["status"] == "Active"
-                            else "▶️",
-                            key=f"toggle_{name}",
-                        ):
-                            strat["status"] = (
-                                "Paused"
-                                if strat["status"] == "Active"
-                                else "Active"
-                            )
-                            st.rerun()
+                        with action2:
+                            if st.button("✏️", key=f"edit_{name}"):
+                                st.session_state.editing_strategy_name = name
+                                st.session_state.navigation_tab = "STRATEGY_BUILDER"
+                                st.rerun()
 
-                    with action2:
-                        if st.button(
-                            "✏️",
-                            key=f"edit_{name}",
-                        ):
-                            st.session_state[
-                                "editing_strategy_name"
-                            ] = name
-                            st.session_state[
-                                "navigation_tab"
-                            ] = "STRATEGY_BUILDER"
-                            st.rerun()
+                        with action3:
+                            if st.button("🗑️", key=f"del_{name}"):
+                                del st.session_state.strategies[name]
+                                st.rerun()
 
-                    with action3:
-                        if st.button(
-                            "🗑️",
-                            key=f"delete_{name}",
-                        ):
-                            del st.session_state.strategies[
-                                name
-                            ]
-                            st.rerun()
+                    st.caption(f"Groups: {', '.join(strat.get('groups', ['Nifty 500']))} | Multiplier: {strat.get('allocation_multiplier', 1.0)}x")
+                    st.caption(f"Rebalance Date: Day {strat.get('rebalance_day', 1)} | {days_left} days left")
+                    st.markdown(f"**Allocated:** ₹{metrics['allocated']:,.2f}")
+                    st.markdown(f"**Realized P&L:** ₹{metrics['realized_pnl']:,.2f}")
+                    st.markdown(f"**Unrealized P&L:** ₹{metrics['unrealized_pnl']:,.2f}")
 
-                    st.caption(
-                        "Groups: "
-                        + ", ".join(
-                            strat.get("groups", [])
-                        )
-                    )
+                    pnl_color = "green" if metrics["total_pnl"] >= 0 else "red"
+                    st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{metrics['total_pnl']:,.2f} ({metrics['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
 
-                    st.markdown(
-                        f"**Allocated:** "
-                        f"₹{metric['allocated']:,.2f}"
-                    )
-
-                    st.markdown(
-                        f"**Realized P&L:** "
-                        f"₹{metric['realized_pnl']:,.2f}"
-                    )
-
-                    st.markdown(
-                        f"**Unrealized P&L:** "
-                        f"₹{metric['unrealized_pnl']:,.2f}"
-                    )
-
-                    color = (
-                        "green"
-                        if metric["total_pnl"] >= 0
-                        else "red"
-                    )
-
-                    st.markdown(
-                        f"**P&L / Returns:** "
-                        f"<span style='color:{color}; "
-                        f"font-weight:bold;'>"
-                        f"₹{metric['total_pnl']:,.2f} "
-                        f"({metric['returns_pct']:.2f}%)"
-                        f"</span>",
-                        unsafe_allow_html=True,
-                    )
-
-                    if st.button(
-                        "🔍 Open Scanner & Details",
-                        key=f"view_{name}",
-                        use_container_width=True,
-                    ):
-                        st.session_state[
-                            "active_strategy_view"
-                        ] = name
+                    if st.button("🔍 Open Scanner & Details", key=f"view_detail_{name}", use_container_width=True):
+                        st.session_state.active_strategy_view = name
                         st.rerun()
 
 
@@ -2064,25 +1815,10 @@ if st.session_state.navigation_tab == "DASHBOARD":
 # STRATEGY BUILDER
 # ==========================================
 elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
-    edit_mode = (
-        st.session_state.editing_strategy_name
-        is not None
-    )
+    edit_mode = st.session_state.editing_strategy_name is not None
+    edit_strat = st.session_state.strategies.get(st.session_state.editing_strategy_name, {}) if edit_mode else {}
 
-    edit_strat = (
-        st.session_state.strategies.get(
-            st.session_state.editing_strategy_name,
-            {},
-        )
-        if edit_mode
-        else {}
-    )
-
-    st.subheader(
-        "✏️ EDIT STRATEGY ENGINE"
-        if edit_mode
-        else "➕ CREATE STRATEGY ENGINE"
-    )
+    st.subheader("✏️ EDIT STRATEGY ENGINE" if edit_mode else "➕ CREATE STRATEGY ENGINE")
 
     inv1, inv2, inv3 = st.columns(3)
 
@@ -2090,243 +1826,80 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         strategy_type = st.radio(
             "Strategy Type:",
             ["Real", "Virtual"],
-            index=(
-                0
-                if edit_strat.get("type") == "Real"
-                else 1
-            ),
+            index=0 if edit_strat.get("type") == "Real" else 1,
             horizontal=True,
         )
 
-        default_name = (
-            st.session_state.editing_strategy_name
-            if edit_mode
-            else "New Momentum Strategy"
-        )
-
-        strategy_name_input = st.text_input(
-            "Strategy Name:",
-            value=default_name,
-            disabled=edit_mode,
-        )
+        default_name = st.session_state.editing_strategy_name if edit_mode else "New Momentum Strategy"
+        strategy_name_input = st.text_input("Strategy Name:", value=default_name, disabled=edit_mode)
 
     with inv2:
-        allocated = st.number_input(
-            "Total Allocation Capital (₹):",
-            value=float(
-                edit_strat.get(
-                    "allocated",
-                    100000.0,
-                )
-            ),
-            step=10000.0,
-        )
-
-        rebalance_frequency = st.selectbox(
-            "Rebalance Frequency:",
-            ["Monthly", "Weekly", "Quarterly"],
-        )
+        allocated = st.number_input("Total Allocation Capital (₹):", value=float(edit_strat.get("allocated", 100000.0)), step=10000.0)
+        rebalance_frequency = st.selectbox("Rebalance Frequency:", ["Monthly", "Weekly", "Quarterly"])
 
     with inv3:
-        rebalance_day = st.number_input(
-            "Rebalance Day (1-28):",
-            value=int(
-                edit_strat.get(
-                    "rebalance_day",
-                    1,
-                )
-            ),
-            min_value=1,
-            max_value=28,
-        )
-
-        allocation_multiplier = st.number_input(
-            "Allocation Multiplier:",
-            value=float(
-                edit_strat.get(
-                    "allocation_multiplier",
-                    1.0,
-                )
-            ),
-            min_value=0.1,
-            max_value=10.0,
-            step=0.1,
-        )
+        rebalance_day = st.number_input("Rebalance Day (1-28):", value=int(edit_strat.get("rebalance_day", 1)), min_value=1, max_value=28)
+        allocation_multiplier = st.number_input("Allocation Multiplier:", value=float(edit_strat.get("allocation_multiplier", 1.0)), min_value=0.1, max_value=10.0, step=0.1)
 
     st.markdown("---")
     st.markdown("#### Asset Universe Selection")
 
-    existing_groups = edit_strat.get(
-        "groups",
-        ["Nifty 500"],
-    )
+    existing_groups = edit_strat.get("groups", ["Nifty 500"])
 
-    group_col1, group_col2, group_col3 = st.columns(3)
+    gcol1, gcol2, gcol3 = st.columns(3)
 
-    with group_col1:
-        nifty500 = st.checkbox(
-            "Nifty 500 Universe",
-            value="Nifty 500" in existing_groups,
-        )
+    with gcol1:
+        nifty500 = st.checkbox("Nifty 500 Universe", value="Nifty 500" in existing_groups)
+        nifty200 = st.checkbox("Nifty 200 Universe", value="Nifty 200" in existing_groups)
+        defensive = st.checkbox("Defensive ETFs", value="Defensive ETFs" in existing_groups)
 
-        nifty200 = st.checkbox(
-            "Nifty 200 Universe",
-            value="Nifty 200" in existing_groups,
-        )
+    with gcol2:
+        domestic = st.checkbox("Domestic ETFs", value="Domestic ETFs" in existing_groups)
+        international = st.checkbox("International ETFs", value="International ETFs" in existing_groups)
+        all_etfs = st.checkbox("All ETFs", value="All ETFs" in existing_groups)
 
-        defensive = st.checkbox(
-            "Defensive ETFs",
-            value="Defensive ETFs" in existing_groups,
-        )
+    with gcol3:
+        gold_only = st.checkbox("Gold ETF Only", value="Gold ETF" in existing_groups)
+        liquid_only = st.checkbox("LiquidBEES Only", value="LiquidBEES" in existing_groups)
+        gov_bond_only = st.checkbox("Gov Bond Only", value="Gov Bond" in existing_groups)
 
-    with group_col2:
-        domestic = st.checkbox(
-            "Domestic ETFs",
-            value="Domestic ETFs" in existing_groups,
-        )
-
-        international = st.checkbox(
-            "International ETFs",
-            value=(
-                "International ETFs"
-                in existing_groups
-            ),
-        )
-
-        all_etfs = st.checkbox(
-            "All ETFs",
-            value="All ETFs" in existing_groups,
-        )
-
-    with group_col3:
-        gold_only = st.checkbox(
-            "Gold ETF Only",
-            value="Gold ETF" in existing_groups,
-        )
-
-        liquid_only = st.checkbox(
-            "LiquidBEES Only",
-            value="LiquidBEES" in existing_groups,
-        )
-
-        gov_bond_only = st.checkbox(
-            "Gov Bond Only",
-            value="Gov Bond" in existing_groups,
-        )
-
-    with st.expander(
-        "View current ETF universe",
-        expanded=False,
-    ):
+    with st.expander("View current ETF universe", expanded=False):
         counts = get_etf_group_counts()
-
-        count1, count2, count3, count4 = st.columns(4)
-
-        count1.metric(
-            "Defensive ETFs",
-            counts["Defensive ETFs"],
-        )
-
-        count2.metric(
-            "Domestic ETFs",
-            counts["Domestic ETFs"],
-        )
-
-        count3.metric(
-            "International ETFs",
-            counts["International ETFs"],
-        )
-
-        count4.metric(
-            "All ETFs",
-            counts["All ETFs"],
-        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Defensive ETFs", counts["Defensive ETFs"])
+        c2.metric("Domestic ETFs", counts["Domestic ETFs"])
+        c3.metric("International ETFs", counts["International ETFs"])
+        c4.metric("All ETFs", counts["All ETFs"])
 
         catalog = get_etf_group_catalog()
 
         if not catalog.empty:
-            st.dataframe(
-                catalog,
-                use_container_width=True,
-                hide_index=True,
-            )
+            st.dataframe(catalog, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.markdown("#### Signal & Execution Settings")
 
-    signal_col1, signal_col2 = st.columns(2)
+    sig1, sig2 = st.columns(2)
 
-    with signal_col1:
+    with sig1:
         signal_type = st.selectbox(
             "Momentum Signal:",
-            [
-                "Simple Momentum",
-                "Volatility-Adjusted Momentum",
-            ],
-            index=(
-                0
-                if edit_strat.get(
-                    "signal_type"
-                )
-                == "Simple Momentum"
-                else 1
-            ),
+            ["Simple Momentum", "Volatility-Adjusted Momentum"],
+            index=0 if edit_strat.get("signal_type") == "Simple Momentum" else 1,
         )
 
-        entry_rank = st.number_input(
-            "Top N Entry Stocks:",
-            value=int(
-                edit_strat.get(
-                    "entry_rank",
-                    10,
-                )
-            ),
-            min_value=1,
-            max_value=50,
-        )
+        entry_rank = st.number_input("Top N Entry Stocks:", value=int(edit_strat.get("entry_rank", 10)), min_value=1, max_value=50)
 
-    with signal_col2:
-        use_regime_filter = st.checkbox(
-            "Enable 200 SMA Regime Filter",
-            value=edit_strat.get(
-                "use_regime_filter",
-                True,
-            ),
-        )
-
-        use_rank_buffer = st.checkbox(
-            "Enable Rank Buffer Rule",
-            value=edit_strat.get(
-                "use_rank_buffer",
-                True,
-            ),
-        )
-
-        exit_rank = st.number_input(
-            "Exit / Buffer Rank Cutoff:",
-            value=int(
-                edit_strat.get(
-                    "exit_rank",
-                    20,
-                )
-            ),
-            min_value=1,
-            max_value=100,
-        )
+    with sig2:
+        use_regime_filter = st.checkbox("Enable 200 SMA Regime Filter", value=edit_strat.get("use_regime_filter", True))
+        use_rank_buffer = st.checkbox("Enable Rank Buffer Rule", value=edit_strat.get("use_rank_buffer", True))
+        exit_rank = st.number_input("Exit / Buffer Rank Cutoff:", value=int(edit_strat.get("exit_rank", 20)), min_value=1, max_value=100)
 
     st.markdown("---")
 
-    save_label = (
-        "💾 Update Strategy Config"
-        if edit_mode
-        else "💾 Deploy New Strategy Profile"
-    )
+    save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
 
-    if st.button(
-        save_label,
-        type="primary",
-        use_container_width=True,
-    ):
+    if st.button(save_label, type="primary", use_container_width=True):
         selected_groups = []
 
         if nifty500:
@@ -2336,19 +1909,13 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             selected_groups.append("Nifty 200")
 
         if defensive:
-            selected_groups.append(
-                "Defensive ETFs"
-            )
+            selected_groups.append("Defensive ETFs")
 
         if domestic:
-            selected_groups.append(
-                "Domestic ETFs"
-            )
+            selected_groups.append("Domestic ETFs")
 
         if international:
-            selected_groups.append(
-                "International ETFs"
-            )
+            selected_groups.append("International ETFs")
 
         if all_etfs:
             selected_groups.append("All ETFs")
@@ -2362,39 +1929,18 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         if gov_bond_only:
             selected_groups.append("Gov Bond")
 
-        target_name = (
-            st.session_state.editing_strategy_name
-            if edit_mode
-            else strategy_name_input
-        )
+        target_name = st.session_state.editing_strategy_name if edit_mode else strategy_name_input
 
         st.session_state.strategies[target_name] = {
-            "created_date": edit_strat.get(
-                "created_date",
-                datetime.now().strftime(
-                    "%Y-%m-%d"
-                ),
-            ),
-            "status": edit_strat.get(
-                "status",
-                "Active",
-            ),
+            "created_date": edit_strat.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+            "status": edit_strat.get("status", "Active"),
             "type": strategy_type,
             "allocated": float(allocated),
-            "realized_pnl": edit_strat.get(
-                "realized_pnl",
-                0.0,
-            ),
+            "realized_pnl": edit_strat.get("realized_pnl", 0.0),
             "rebalance_freq": rebalance_frequency,
             "rebalance_day": rebalance_day,
-            "groups": (
-                selected_groups
-                if selected_groups
-                else ["Nifty 500"]
-            ),
-            "allocation_multiplier": float(
-                allocation_multiplier
-            ),
+            "groups": selected_groups if selected_groups else ["Nifty 500"],
+            "allocation_multiplier": float(allocation_multiplier),
             "entry_rank": entry_rank,
             "exit_rank": exit_rank,
             "signal_type": signal_type,
@@ -2403,10 +1949,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "pct_from_high": 15.0,
             "moving_average": "200 EMA",
             "use_rs": True,
-            "positions": edit_strat.get(
-                "positions",
-                [],
-            ),
+            "positions": edit_strat.get("positions", []),
         }
 
         st.session_state.editing_strategy_name = None
@@ -2419,109 +1962,47 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
 # ==========================================
 elif st.session_state.navigation_tab == "BACKTEST":
     st.title("📈 BACKTEST STUDIO")
+    st.caption("Simulate historical momentum performance using the selected strategy universe.")
 
-    st.caption(
-        "Historical momentum simulation using the "
-        "selected strategy universe."
-    )
+    strategy_names = list(st.session_state.strategies.keys())
+    selected_strategy = st.selectbox("Select Base Strategy:", strategy_names)
 
-    strategy_names = list(
-        st.session_state.strategies.keys()
-    )
-
-    selected_strategy = st.selectbox(
-        "Select Base Strategy:",
-        strategy_names,
-    )
-
-    strategy_config = st.session_state.strategies[
-        selected_strategy
-    ]
+    strategy_config = st.session_state.strategies[selected_strategy]
 
     st.markdown("---")
 
     bt1, bt2, bt3 = st.columns(3)
 
     with bt1:
-        initial_capital = st.number_input(
-            "Initial Backtest Capital (₹):",
-            value=100000.0,
-            step=10000.0,
-        )
-
-        signal_model = st.selectbox(
-            "Signal Layer Model:",
-            [
-                "Simple Momentum",
-                "Volatility-Adjusted Momentum",
-            ],
-        )
+        initial_capital = st.number_input("Initial Backtest Capital (₹):", value=100000.0, step=10000.0)
+        signal_model = st.selectbox("Signal Layer Model:", ["Simple Momentum", "Volatility-Adjusted Momentum"])
 
     with bt2:
-        start_date = st.date_input(
-            "Start Date:",
-            value=datetime.now()
-            - timedelta(days=365 * 3),
-        )
-
-        regime_filter = st.checkbox(
-            "Enable 200 SMA Regime Filter",
-            value=True,
-        )
+        start_date = st.date_input("Start Date:", value=datetime.now() - timedelta(days=365 * 3))
+        regime_filter = st.checkbox("Enable 200 SMA Regime Filter", value=True)
 
     with bt3:
-        end_date = st.date_input(
-            "End Date:",
-            value=datetime.now(),
-        )
+        end_date = st.date_input("End Date:", value=datetime.now())
+        rank_buffer = st.checkbox("Enable Rank Buffer Rule", value=True)
+        buffer_value = st.number_input("Buffer Rank Cutoff:", value=20, min_value=10, max_value=50)
 
-        rank_buffer = st.checkbox(
-            "Enable Rank Buffer Rule",
-            value=True,
-        )
-
-        buffer_value = st.number_input(
-            "Buffer Rank Cutoff:",
-            value=20,
-            min_value=10,
-            max_value=50,
-        )
-
-    if st.button(
-        "📊 Run Strategy Backtest Simulation",
-        type="primary",
-        use_container_width=True,
-    ):
-        with st.spinner(
-            "Loading data and running backtest..."
-        ):
-            release_df = (
-                load_historical_release_dataset()
-            )
+    if st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True):
+        with st.spinner("Running backtest..."):
+            release_df = load_historical_release_dataset()
 
             benchmark_series = None
 
             if "^NSEI" in release_df.columns:
-                benchmark_series = release_df[
-                    "^NSEI"
-                ]
-
-                stock_prices = release_df.drop(
-                    columns=["^NSEI"]
-                )
-
+                benchmark_series = release_df["^NSEI"]
+                stock_prices = release_df.drop(columns=["^NSEI"])
             else:
                 stock_prices = release_df
 
             result = run_backtest_simulation(
                 strat_config=strategy_config,
                 initial_capital=initial_capital,
-                start_date=start_date.strftime(
-                    "%Y-%m-%d"
-                ),
-                end_date=end_date.strftime(
-                    "%Y-%m-%d"
-                ),
+                start_date=start_date.strftime("%Y-%m-%d"),
+                end_date=end_date.strftime("%Y-%m-%d"),
                 price_df=stock_prices,
                 benchmark_series=benchmark_series,
                 signal_type=signal_model,
@@ -2531,70 +2012,25 @@ elif st.session_state.navigation_tab == "BACKTEST":
             )
 
             if result is None or result.empty:
-                st.error(
-                    "Insufficient market data for the "
-                    "selected period."
-                )
-
+                st.error("Insufficient market data for the selected timeframe.")
             else:
-                st.success(
-                    "Backtest completed successfully."
-                )
+                st.success("Backtest completed successfully.")
 
-                final_value = float(
-                    result["Portfolio Value"].iloc[-1]
-                )
+                final_value = float(result["Portfolio Value"].iloc[-1])
+                total_return_pct = ((final_value - initial_capital) / initial_capital) * 100
 
-                return_pct = (
-                    (final_value - initial_capital)
-                    / initial_capital
-                ) * 100
+                peak = result["Portfolio Value"].cummax()
+                drawdown = (result["Portfolio Value"] - peak) / peak
+                max_drawdown_pct = drawdown.min() * 100
 
-                peak = result[
-                    "Portfolio Value"
-                ].cummax()
+                r1, r2, r3 = st.columns(3)
 
-                drawdown = (
-                    result["Portfolio Value"]
-                    - peak
-                ) / peak
+                r1.metric("Final Portfolio Value", f"₹{final_value:,.2f}")
+                r2.metric("Total Backtest Return", f"{total_return_pct:.2f}%")
+                r3.metric("Max Drawdown", f"{max_drawdown_pct:.2f}%")
 
-                max_drawdown = (
-                    drawdown.min() * 100
-                )
+                st.markdown("#### Portfolio Value Curve")
+                st.line_chart(result["Portfolio Value"])
 
-                result_col1, result_col2, result_col3 = (
-                    st.columns(3)
-                )
-
-                result_col1.metric(
-                    "Final Portfolio Value",
-                    f"₹{final_value:,.2f}",
-                )
-
-                result_col2.metric(
-                    "Total Backtest Return",
-                    f"{return_pct:.2f}%",
-                )
-
-                result_col3.metric(
-                    "Maximum Drawdown",
-                    f"{max_drawdown:.2f}%",
-                )
-
-                st.markdown(
-                    "#### Portfolio Value Curve"
-                )
-
-                st.line_chart(
-                    result["Portfolio Value"]
-                )
-
-                st.markdown(
-                    "#### Monthly Portfolio Data"
-                )
-
-                st.dataframe(
-                    result,
-                    use_container_width=True,
-                )
+                st.markdown("#### Historical Monthly Portfolio Data")
+                st.dataframe(result, use_container_width=True)
