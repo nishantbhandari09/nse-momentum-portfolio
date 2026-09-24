@@ -660,15 +660,16 @@ def calculate_volatility_adjusted_momentum(
 
 def get_momentum_scores(
     price_df,
-    signal_type="Ranking",
+    signal_type="Returns",
     lookback_days=126,
 ):
-    if signal_type == "Volatility-Adjusted":
+    if signal_type == "Volatility":
         return calculate_volatility_adjusted_momentum(
             price_df,
             lookback_days,
         )
 
+    # Returns = trailing return ranking.
     return calculate_simple_momentum(
         price_df,
         lookback_days,
@@ -794,7 +795,7 @@ def apply_entry_exit_ranks(
 
 def run_backtest_simulation(
     strat_config, initial_capital, start_date, end_date,
-    price_df=None, benchmark_series=None, signal_type="Ranking",
+    price_df=None, benchmark_series=None, signal_type="Returns",
 ):
     if price_df is None or price_df.empty:
         tickers = get_trusted_tickers_by_group(strat_config.get("groups", ["Nifty 500"]))
@@ -898,7 +899,18 @@ def run_backtest_simulation(
             if symbol in latest.index and pd.notna(latest[symbol]):
                 portfolio_value += qty * latest[symbol]
         if current_date >= start_ts:
-            portfolio_history.append({"Date": current_date, "Portfolio Value": float(portfolio_value)})
+            previous_symbols = set(holdings.keys())
+            # Track the actual post-rebalance portfolio for the month.
+            # The selected list is the portfolio for this rebalance date.
+            # Capture changes against the prior month before the next iteration.
+            portfolio_history.append({
+                "Date": current_date,
+                "Portfolio Value": float(portfolio_value),
+                "Holdings": ", ".join(selected),
+                "Added": ", ".join([x for x in selected if x not in previous_holdings]) if 'previous_holdings' in locals() else ", ".join(selected),
+                "Exited": ", ".join([x for x in previous_holdings if x not in selected]) if 'previous_holdings' in locals() else "",
+            })
+        previous_holdings = set(selected)
 
     if not portfolio_history:
         return None
@@ -950,8 +962,8 @@ def run_strategy_stock_scanner(
     Scan the selected stock/ETF universe.
 
     Core ranking:
-      1. Ranking = raw 126-day momentum
-      2. Volatility-Adjusted = momentum adjusted for annualised volatility and R²
+      1. Returns = raw trailing 126-day return
+      2. Volatility = return adjusted for annualised volatility and R²
 
     Portfolio rule:
       - Entry rank controls new entries.
@@ -1043,7 +1055,7 @@ def run_strategy_stock_scanner(
         errors="ignore",
     )
 
-    signal_model = strat.get("signal_type", "Ranking")
+    signal_model = strat.get("signal_type", "Returns")
     scores = get_momentum_scores(
         filtered_df,
         signal_type=signal_model,
@@ -1299,8 +1311,10 @@ if "strategies" not in st.session_state:
             "defensive_options": {"LiquidBEES": [1], "G-Sec": [1], "Gold": True},
             "use_rs": True,
             "rs_benchmark": "Nifty 500 / G-Sec",
-            "signal_type": "Ranking",
+            "signal_type": "Returns",
             "positions": [],
+            "previous_rebalance_symbols": [],
+            "last_rebalance_symbols": [],
         }
     }
 
@@ -1561,36 +1575,59 @@ if st.session_state.navigation_tab == "DASHBOARD":
                 f"{st.session_state.get('last_scan_fallback_count', 0)}"
             )
 
-            sc_col1, sc_col2 = st.columns(2)
+            st.markdown("#### 📌 Portfolio Status")
+            latest_selected = st.session_state.get(f"scanned_results_{strat_name}") or strat.get("last_rebalance_symbols", [])
+            previous_selected = strat.get("previous_rebalance_symbols", [])
+            current_symbols = [p.get("Symbol") for p in strat.get("positions", []) if p.get("Symbol")]
+            entered = [x for x in latest_selected if x not in previous_selected]
+            exited = [x for x in previous_selected if x not in latest_selected]
 
-            with sc_col1:
-                st.markdown("#### 📌 Current Holdings")
+            status_tabs = st.tabs(["Current Holdings", "Selected Entry Stocks", "Stocks Entered", "Stocks Exited"])
+
+            with status_tabs[0]:
                 if metrics["positions_data"]:
-                    st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True)
+                    st.dataframe(pd.DataFrame(metrics["positions_data"]), use_container_width=True, hide_index=True)
                 else:
-                    st.info("No active holdings.")
+                    st.info("No active holdings. Execute the first rebalance to create the portfolio.")
 
-            with sc_col2:
-                st.markdown("#### 🔄 Scanned Portfolio")
-                prices_df = fetch_market_data(scanned_results, period="5d")
-
-                rows = []
-
-                for ticker in scanned_results:
-                    if not prices_df.empty and ticker in prices_df.columns:
-                        current_price = float(prices_df[ticker].dropna().iloc[-1])
-                    else:
-                        current_price = 0.0
-
-                    rows.append(
-                        {
-                            "Symbol": ticker.replace(".NS", ""),
-                            "CMP": f"₹{current_price:,.2f}",
-                            "Status": "Entry Target",
-                        }
+            with status_tabs[1]:
+                if latest_selected:
+                    st.dataframe(
+                        pd.DataFrame({"Symbol": [x.replace(".NS", "") for x in latest_selected], "Selection": ["Selected Entry" for _ in latest_selected]}),
+                        use_container_width=True,
+                        hide_index=True,
                     )
+                else:
+                    st.info("No selected entry stocks yet. Run the scanner.")
 
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            with status_tabs[2]:
+                if entered:
+                    st.dataframe(pd.DataFrame({"Symbol": [x.replace(".NS", "") for x in entered]}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No new stocks/ETFs entered at the latest comparison.")
+
+            with status_tabs[3]:
+                if exited:
+                    st.dataframe(pd.DataFrame({"Symbol": [x.replace(".NS", "") for x in exited]}), use_container_width=True, hide_index=True)
+                else:
+                    st.info("No stocks/ETFs exited at the latest comparison.")
+
+            st.markdown("#### 🔄 Latest Scanned Portfolio")
+            if scanned_results:
+                prices_df = fetch_market_data(scanned_results, period="5d")
+                rows = []
+                for ticker in scanned_results:
+                    current_price = 0.0
+                    if not prices_df.empty and ticker in prices_df.columns and not prices_df[ticker].dropna().empty:
+                        current_price = float(prices_df[ticker].dropna().iloc[-1])
+                    rows.append({
+                        "Symbol": ticker.replace(".NS", ""),
+                        "CMP": f"₹{current_price:,.2f}",
+                        "Status": "Selected Entry" if ticker in latest_selected else "Defensive / Retained",
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("Run the scanner to see the latest ranked portfolio.")
 
             defensive_ranking = st.session_state.get("last_defensive_ranking", [])
 
@@ -1646,6 +1683,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
                     for position in new_positions
                 ]
 
+                strat["previous_rebalance_symbols"] = list(old_symbols)
                 strat["positions"] = new_positions
                 strat["realized_pnl"] = metrics["total_pnl"]
                 strat["last_rebalance"] = datetime.now().strftime(
@@ -1935,10 +1973,10 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     with f3:
         signal_type = st.selectbox(
             "Momentum Signal:",
-            ["Ranking", "Volatility-Adjusted"],
+            ["Returns", "Volatility"],
             index=(
                 0
-                if edit_strat.get("signal_type", "Ranking") == "Ranking"
+                if edit_strat.get("signal_type", "Returns") == "Returns"
                 else 1
             ),
         )
@@ -2099,10 +2137,10 @@ elif st.session_state.navigation_tab == "BACKTEST":
         )
         signal_model = st.selectbox(
             "Momentum Signal:",
-            ["Ranking", "Volatility-Adjusted"],
+            ["Returns", "Volatility"],
             index=(
                 0
-                if strategy_config.get("signal_type", "Ranking") == "Ranking"
+                if strategy_config.get("signal_type", "Returns") == "Returns"
                 else 1
             ),
         )
@@ -2177,5 +2215,14 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 st.markdown("#### Portfolio Value Curve")
                 st.line_chart(result["Portfolio Value"])
 
+                st.markdown("#### Monthly Rebalance Adjustments")
+                monthly = result.reset_index().copy()
+                monthly["Month"] = pd.to_datetime(monthly["Date"]).dt.strftime("%b %Y")
+                monthly_view = monthly[["Month", "Holdings", "Added", "Exited", "Portfolio Value"]].copy()
+                monthly_view["Holdings"] = monthly_view["Holdings"].replace("", "—")
+                monthly_view["Added"] = monthly_view["Added"].replace("", "—")
+                monthly_view["Exited"] = monthly_view["Exited"].replace("", "—")
+                st.dataframe(monthly_view, use_container_width=True, hide_index=True)
+
                 st.markdown("#### Historical Monthly Portfolio Data")
-                st.dataframe(result, use_container_width=True)
+                st.dataframe(result, use_container_width=True, hide_index=True)
