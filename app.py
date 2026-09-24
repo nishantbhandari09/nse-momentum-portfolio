@@ -87,7 +87,6 @@ NIFTY_REGIME_TICKER = "^CRSLDX"
 GSEC_REGIME_TICKER = "SETFGSEC.NS"
 
 ETF_GROUP_NAMES = [
-    "Defensive ETFs",
     "Domestic ETFs",
     "International ETFs",
     "All ETFs",
@@ -454,56 +453,46 @@ def classify_etf(name, symbol):
     text = f"{name} {symbol}".upper()
     text = re.sub(r"[^A-Z0-9]+", " ", text)
 
-    defensive_terms = [
-        "GOLD",
-        "SILVER",
-        "LIQUID",
-        "GILT",
-        "GSEC",
-        "GOVERNMENT",
-        "GOVT",
-        "TREASURY",
-        "BOND",
-        "DEBT",
-        "OVERNIGHT",
-        "MONEY MARKET",
-        "CORPORATE BOND",
-        "AAA",
+    gold_terms = [
+        "GOLD", "GOLDBEES", "GOLD ETF", "GOLD FUND",
     ]
-
+    liquid_terms = [
+        "LIQUID", "LIQUIDBEES", "OVERNIGHT", "MONEY MARKET",
+    ]
+    gsec_terms = [
+        "GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY",
+        "GOV BOND", "GOVERNMENT BOND", "SOVEREIGN",
+    ]
+    defensive_terms = liquid_terms + gsec_terms + [
+        "BOND", "DEBT", "CORPORATE BOND", "AAA", "SILVER",
+    ]
     international_terms = [
-        "INTERNATIONAL",
-        "GLOBAL",
-        "WORLD",
-        "NASDAQ",
-        "S&P 500",
-        "SP 500",
-        "S&P500",
-        "MSCI",
-        "HANG SENG",
-        "CHINA",
-        "JAPAN",
-        "EUROPE",
-        "US EQUITY",
-        "USA",
-        "UNITED STATES",
-        "UNITED KINGDOM",
-        "UK EQUITY",
-        "GERMANY",
-        "FRANCE",
-        "TAIWAN",
-        "BRAZIL",
-        "EMERGING MARKET",
-        "NYSE",
+        "INTERNATIONAL", "GLOBAL", "WORLD", "NASDAQ", "S&P 500",
+        "SP 500", "S&P500", "MSCI", "HANG SENG", "CHINA", "JAPAN",
+        "EUROPE", "US EQUITY", "USA", "UNITED STATES",
+        "UNITED KINGDOM", "UK EQUITY", "GERMANY", "FRANCE", "TAIWAN",
+        "BRAZIL", "EMERGING MARKET", "NYSE",
     ]
 
+    if any(term in text for term in gold_terms):
+        return "Defensive ETFs"
     if any(term in text for term in defensive_terms):
         return "Defensive ETFs"
-
     if any(term in text for term in international_terms):
         return "International ETFs"
-
     return "Domestic ETFs"
+
+
+def classify_defensive_type(name, symbol):
+    text = f"{name} {symbol}".upper()
+    text = re.sub(r"[^A-Z0-9]+", " ", text)
+    if any(x in text for x in ["GOLD", "GOLDBEES"]):
+        return "Gold"
+    if any(x in text for x in ["LIQUID", "LIQUIDBEES", "OVERNIGHT", "MONEY MARKET"]):
+        return "LiquidBEES"
+    if any(x in text for x in ["GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY", "GOV BOND", "SOVEREIGN"]):
+        return "G-Sec"
+    return "Other Defensive"
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -548,21 +537,20 @@ def load_nse_etf_catalog():
 
             seen.add(yahoo_symbol)
 
-            records.append(
-                {
-                    "symbol": yahoo_symbol,
-                    "name": name,
-                    "group": classify_etf(
-                        name,
-                        symbol,
-                    ),
-                }
-            )
+            record = dict(row)
+            record["symbol"] = yahoo_symbol
+            record["name"] = name
+            record["group"] = classify_etf(name, symbol)
+            record["defensive_type"] = classify_defensive_type(name, symbol)
+            records.append(record)
 
-        catalog = pd.DataFrame(
-            records,
-            columns=["symbol", "name", "group"],
-        )
+        catalog = pd.DataFrame(records)
+        if not catalog.empty:
+            # Keep every field returned by NSE.  Put the fields used by the
+            # strategy first, while preserving all other ETF metadata.
+            preferred = ["symbol", "name", "group", "defensive_type"]
+            other = [c for c in catalog.columns if c not in preferred]
+            catalog = catalog[preferred + other]
 
         if not catalog.empty:
             return catalog
@@ -576,6 +564,7 @@ def load_nse_etf_catalog():
                 "symbol": ticker,
                 "name": "",
                 "group": classify_etf("", ticker),
+                "defensive_type": classify_defensive_type("", ticker),
             }
             for ticker in ETF_FALLBACK_TICKERS
         ]
@@ -627,6 +616,14 @@ def get_etf_group_catalog(group=None):
             catalog["group"] == group
         ]
 
+    return catalog
+
+
+def get_defensive_catalog(defensive_type=None):
+    catalog = load_nse_etf_catalog()
+    catalog = catalog[catalog["group"] == "Defensive ETFs"]
+    if defensive_type:
+        catalog = catalog[catalog["defensive_type"] == defensive_type]
     return catalog
 
 
@@ -773,78 +770,57 @@ def rank_defensive_etfs_with_multipliers(
     prices_df,
     target_count,
     lookback_days=126,
+    defensive_options=None,
 ):
-    """
-    Rank only LiquidBEES and G-Sec ETFs using 3x, 2x and 1x
-    momentum scores, for ranking only.
+    """Rank selected defensive assets using only the user-selected multipliers."""
+    options = defensive_options or {
+        "LiquidBEES": [1],
+        "G-Sec": [1],
+        "Gold": True,
+    }
 
-    Example:
-      6% return -> 1x = 6%, 2x = 12%, 3x = 18%
-    """
-    defensive_tickers = get_defensive_etf_tickers()
+    rows = []
+    groups = {
+        "LiquidBEES": get_defensive_catalog("LiquidBEES"),
+        "G-Sec": get_defensive_catalog("G-Sec"),
+        "Gold": get_defensive_catalog("Gold"),
+    }
 
-    available = [
-        ticker
-        for ticker in defensive_tickers
-        if ticker in prices_df.columns
-    ]
-
-    if not available:
-        return []
-
-    defensive_prices = prices_df[available].copy()
-
-    raw_returns = calculate_simple_momentum(
-        defensive_prices,
-        lookback_days=lookback_days,
-    )
-
-    if raw_returns.empty:
-        return []
-
-    raw_returns = raw_returns.dropna()
-
-    candidates = []
-
-    for multiplier in [3, 2, 1]:
-        for ticker in raw_returns.index:
-            raw_return = float(raw_returns[ticker])
-            adjusted_return = raw_return * multiplier
-
-            candidates.append(
-                {
-                    "Symbol": ticker,
-                    "Multiplier": multiplier,
-                    "Raw Return": raw_return,
-                    "Adjusted Return": adjusted_return,
-                }
-            )
-
-    # Higher multiplier first, then higher adjusted return.
-    candidates.sort(
-        key=lambda row: (
-            row["Multiplier"],
-            row["Adjusted Return"],
-        ),
-        reverse=True,
-    )
-
-    selected = []
-    seen = set()
-
-    for candidate in candidates:
-        symbol = candidate["Symbol"]
-
-        if symbol in seen:
+    for defensive_type, catalog in groups.items():
+        if catalog.empty:
+            continue
+        tickers = [t for t in catalog["symbol"].dropna().unique() if t in prices_df.columns]
+        if not tickers:
+            continue
+        raw = calculate_simple_momentum(prices_df[tickers], lookback_days=lookback_days).dropna()
+        if raw.empty:
             continue
 
-        seen.add(symbol)
-        selected.append(candidate)
+        if defensive_type == "Gold":
+            multipliers = [1] if options.get("Gold", False) else []
+        else:
+            multipliers = [int(x) for x in options.get(defensive_type, [])]
 
-        if len(selected) >= target_count:
-            break
+        for ticker in raw.index:
+            for multiplier in multipliers:
+                raw_return = float(raw[ticker])
+                rows.append({
+                    "Symbol": ticker,
+                    "Defensive Type": defensive_type,
+                    "Multiplier": multiplier,
+                    "Raw Return": raw_return,
+                    "Adjusted Return": raw_return * multiplier,
+                })
 
-    return selected
+    if not rows:
+        return []
+
+    ranked = pd.DataFrame(rows).sort_values(
+        ["Adjusted Return", "Raw Return"], ascending=False
+    )
+    # A ticker is selected only once; its best selected multiplier is used.
+    ranked = ranked.drop_duplicates(subset=["Symbol"], keep="first")
+    return ranked.head(target_count).to_dict("records")
 
 
 def is_regime_bullish(
@@ -901,7 +877,6 @@ def run_backtest_simulation(
     price_df=None,
     benchmark_series=None,
     signal_type="Ranking",
-    use_regime_filter=True,
 ):
     if price_df is None or price_df.empty:
         groups = strat_config.get(
@@ -946,18 +921,6 @@ def run_backtest_simulation(
         if len(history) < 126:
             continue
 
-        regime_ok = True
-
-        if (
-            use_regime_filter
-            and benchmark_series is not None
-        ):
-            regime_ok = is_regime_bullish(
-                benchmark_series,
-                current_date,
-                sma_period=200,
-            )
-
         total_value = current_cash
 
         for symbol, quantity in current_holdings.items():
@@ -993,35 +956,30 @@ def run_backtest_simulation(
             .tolist()
         )
 
-        if not regime_ok:
-            current_holdings = {}
-            current_cash = total_value
-        else:
-            entry_rank = strat_config.get("entry_rank", 10)
-            exit_rank = strat_config.get("exit_rank", 20)
+        entry_rank = strat_config.get("entry_rank", 10)
+        exit_rank = strat_config.get("exit_rank", 20)
 
-            selected_stocks = apply_entry_exit_ranks(
-                list(current_holdings.keys()),
-                ranked_stocks,
-                entry_rank,
-                exit_rank,
+        selected_stocks = apply_entry_exit_ranks(
+            list(current_holdings.keys()),
+            ranked_stocks,
+            entry_rank,
+            exit_rank,
+        )
+
+        if len(selected_stocks) < entry_rank:
+            fallback_needed = entry_rank - len(selected_stocks)
+            fallback = rank_defensive_etfs_with_multipliers(
+                prices_df=history,
+                target_count=fallback_needed,
+                lookback_days=126,
+                defensive_options=strat_config.get("defensive_options"),
             )
-
-            # If too few stocks pass the strategy criteria, use only
-            # LiquidBEES / G-Sec as defensive fallback assets.
-            if len(selected_stocks) < entry_rank:
-                fallback_needed = entry_rank - len(selected_stocks)
-                fallback = rank_defensive_etfs_with_multipliers(
-                    prices_df=history,
-                    target_count=fallback_needed,
-                    lookback_days=126,
-                )
-                for item in fallback:
-                    symbol = item["Symbol"]
-                    if symbol not in selected_stocks:
-                        selected_stocks.append(symbol)
-                    if len(selected_stocks) >= entry_rank:
-                        break
+            for item in fallback:
+                symbol = item["Symbol"]
+                if symbol not in selected_stocks:
+                    selected_stocks.append(symbol)
+                if len(selected_stocks) >= entry_rank:
+                    break
 
             if selected_stocks:
                 allocation_per_stock = (
@@ -1176,8 +1134,8 @@ def run_strategy_stock_scanner(
       - Entry rank controls new entries.
       - Exit rank controls how far an existing holding can fall before exit.
       - No user-configurable rank-buffer setting.
-      - If fewer than Entry Rank stocks qualify, LiquidBEES/G-Sec are
-        automatically used as defensive fallback assets.
+      - If fewer than Entry Rank stocks qualify, selected defensive assets are
+        automatically used as fallback assets.
     """
     selected_groups = strat.get("groups", ["Nifty 500"])
 
@@ -1203,8 +1161,12 @@ def run_strategy_stock_scanner(
             period = 200
         elif "100" in ma_config:
             period = 100
-        else:
+        elif "50" in ma_config:
             period = 50
+        elif "20" in ma_config:
+            period = 20
+        else:
+            period = 10
 
         ma_values = (
             prices_df.ewm(span=period, adjust=False).mean().iloc[-1]
@@ -1285,6 +1247,7 @@ def run_strategy_stock_scanner(
             prices_df=prices_df,
             target_count=defensive_target,
             lookback_days=126,
+            defensive_options=strat.get("defensive_options"),
         )
 
         for result in defensive_results:
@@ -1512,10 +1475,10 @@ if "strategies" not in st.session_state:
             "pct_from_high": 15.0,
             "pct_from_low": 0.0,
             "moving_average": "200 EMA",
+            "defensive_options": {"LiquidBEES": [1], "G-Sec": [1], "Gold": True},
             "use_rs": True,
             "rs_benchmark": "Nifty 500 / G-Sec",
             "signal_type": "Ranking",
-            "use_regime_filter": True,
             "positions": [],
         }
     }
@@ -1992,63 +1955,58 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         )
 
     st.markdown("---")
-    st.markdown("#### Asset Universe")
-
+    st.markdown("#### Group 1 — Main Ranking Universe")
     existing_groups = edit_strat.get("groups", ["Nifty 500"])
 
-    gcol1, gcol2, gcol3 = st.columns(3)
+    g1 = st.columns(5)
+    with g1[0]:
+        nifty500 = st.checkbox("Nifty 500", value="Nifty 500" in existing_groups)
+    with g1[1]:
+        nifty200 = st.checkbox("Nifty 200", value="Nifty 200" in existing_groups)
+    with g1[2]:
+        domestic = st.checkbox("Domestic ETF", value="Domestic ETFs" in existing_groups)
+    with g1[3]:
+        international = st.checkbox("International ETF", value="International ETFs" in existing_groups)
+    with g1[4]:
+        all_etfs = st.checkbox("All ETFs", value="All ETFs" in existing_groups)
 
-    with gcol1:
-        nifty500 = st.checkbox(
-            "Nifty 500 Universe",
-            value="Nifty 500" in existing_groups,
-        )
-        nifty200 = st.checkbox(
-            "Nifty 200 Universe",
-            value="Nifty 200" in existing_groups,
-        )
+    st.markdown("#### Group 2 — Defensive Ranking")
+    existing_def = edit_strat.get("defensive_options", {"LiquidBEES": [1], "G-Sec": [1], "Gold": True})
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.markdown("**LiquidBEES**")
+        liquid_1x = st.checkbox("1x", value=1 in existing_def.get("LiquidBEES", []), key="def_liq_1")
+        liquid_2x = st.checkbox("2x", value=2 in existing_def.get("LiquidBEES", []), key="def_liq_2")
+        liquid_3x = st.checkbox("3x", value=3 in existing_def.get("LiquidBEES", []), key="def_liq_3")
+    with d2:
+        st.markdown("**G-Sec ETF**")
+        gsec_1x = st.checkbox("1x", value=1 in existing_def.get("G-Sec", []), key="def_gsec_1")
+        gsec_2x = st.checkbox("2x", value=2 in existing_def.get("G-Sec", []), key="def_gsec_2")
+        gsec_3x = st.checkbox("3x", value=3 in existing_def.get("G-Sec", []), key="def_gsec_3")
+    with d3:
+        gold_defensive = st.checkbox("Gold ETF", value=bool(existing_def.get("Gold", True)), key="def_gold")
+        st.caption("Gold is ranked at 1x only — no multiplier.")
 
-    with gcol2:
-        domestic = st.checkbox(
-            "Domestic ETFs",
-            value="Domestic ETFs" in existing_groups,
-        )
-        international = st.checkbox(
-            "International ETFs",
-            value="International ETFs" in existing_groups,
-        )
+    st.caption("Multipliers are used only to rank defensive alternatives. They do not change portfolio allocation.")
 
-    with gcol3:
-        all_etfs = st.checkbox(
-            "All ETFs",
-            value="All ETFs" in existing_groups,
-        )
-        gold_only = st.checkbox(
-            "Gold ETF Only",
-            value="Gold ETF" in existing_groups,
-        )
-
-    st.caption(
-        "All NSE ETFs are discovered dynamically. LiquidBEES and G-Sec "
-        "are reserved as automatic defensive fallback assets when too "
-        "few securities pass the stock filters."
-    )
-
-    with st.expander("View current ETF universe", expanded=False):
-        counts = get_etf_group_counts()
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Defensive ETFs", counts["Defensive ETFs"])
-        c2.metric("Domestic ETFs", counts["Domestic ETFs"])
-        c3.metric("International ETFs", counts["International ETFs"])
-        c4.metric("All ETFs", counts["All ETFs"])
-
+    with st.expander("View all NSE ETF data", expanded=False):
         catalog = get_etf_group_catalog()
         if not catalog.empty:
-            st.dataframe(
+            tabs = st.tabs(["All ETFs", "Domestic", "International", "Defensive", "Gold", "LiquidBEES", "G-Sec"])
+            frames = [
                 catalog,
-                use_container_width=True,
-                hide_index=True,
-            )
+                catalog[catalog["group"] == "Domestic ETFs"],
+                catalog[catalog["group"] == "International ETFs"],
+                catalog[catalog["group"] == "Defensive ETFs"],
+                catalog[catalog["defensive_type"] == "Gold"],
+                catalog[catalog["defensive_type"] == "LiquidBEES"],
+                catalog[catalog["defensive_type"] == "G-Sec"],
+            ]
+            for tab, frame in zip(tabs, frames):
+                with tab:
+                    st.dataframe(frame, use_container_width=True, hide_index=True)
+        else:
+            st.warning("NSE ETF catalogue could not be loaded right now.")
 
     st.markdown("---")
     st.markdown("#### Selection Criteria")
@@ -2058,13 +2016,13 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     with f1:
         moving_average = st.selectbox(
             "EMA Filter:",
-            ["None", "50 EMA", "100 EMA", "200 EMA"],
+            ["None", "10 EMA", "20 EMA", "50 EMA", "100 EMA", "200 EMA"],
             index=(
-                ["None", "50 EMA", "100 EMA", "200 EMA"].index(
+                ["None", "10 EMA", "20 EMA", "50 EMA", "100 EMA", "200 EMA"].index(
                     edit_strat.get("moving_average", "200 EMA")
                 )
                 if edit_strat.get("moving_average", "200 EMA")
-                in ["None", "50 EMA", "100 EMA", "200 EMA"]
+                in ["None", "10 EMA", "20 EMA", "50 EMA", "100 EMA", "200 EMA"]
                 else 3
             ),
         )
@@ -2111,10 +2069,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         )
 
     with r3:
-        use_regime_filter = st.checkbox(
-            "Enable 200 SMA Regime Filter",
-            value=edit_strat.get("use_regime_filter", True),
-        )
+        st.caption("No separate market-regime filter. The selected EMA is the only trend filter.")
 
     st.info(
         "Existing holdings stay invested until they fall below the Exit Rank. "
@@ -2146,8 +2101,12 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             selected_groups.append("International ETFs")
         if all_etfs:
             selected_groups.append("All ETFs")
-        if gold_only:
-            selected_groups.append("Gold ETF")
+
+        defensive_options = {
+            "LiquidBEES": [x for x, enabled in [(1, liquid_1x), (2, liquid_2x), (3, liquid_3x)] if enabled],
+            "G-Sec": [x for x, enabled in [(1, gsec_1x), (2, gsec_2x), (3, gsec_3x)] if enabled],
+            "Gold": gold_defensive,
+        }
 
         target_name = (
             st.session_state.editing_strategy_name
@@ -2176,9 +2135,9 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "entry_rank": int(entry_rank),
             "exit_rank": int(exit_rank),
             "signal_type": signal_type,
-            "use_regime_filter": use_regime_filter,
             "pct_from_high": float(pct_from_high),
             "moving_average": moving_average,
+            "defensive_options": defensive_options,
             "use_rs": True,
             "rs_benchmark": "Nifty 500 / G-Sec",
             "positions": edit_strat.get("positions", []),
@@ -2228,10 +2187,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
             "Start Date:",
             value=datetime.now() - timedelta(days=365 * 3),
         )
-        regime_filter = st.checkbox(
-            "Enable 200 SMA Regime Filter",
-            value=strategy_config.get("use_regime_filter", True),
-        )
+        st.caption("No separate 200 SMA regime filter — EMA is handled in Selection Criteria.")
 
     with bt3:
         end_date = st.date_input(
@@ -2265,7 +2221,6 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 price_df=stock_prices,
                 benchmark_series=benchmark_series,
                 signal_type=signal_model,
-                use_regime_filter=regime_filter,
             )
 
             if result is None or result.empty:
