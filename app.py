@@ -9,7 +9,6 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-from kite_auth import get_authenticated_kite
 
 
 # ==========================================
@@ -92,6 +91,15 @@ ETF_GROUP_NAMES = [
     "All ETFs",
 ]
 
+ETF_CATEGORY_LABELS = [
+    "Equity",
+    "Gold",
+    "World Indices",
+    "Debt",
+    "Silver",
+    "Other",
+]
+
 ETF_FALLBACK_TICKERS = [
     "GOLDBEES.NS",
     "LIQUIDBEES.NS",
@@ -111,277 +119,65 @@ KITE_SECRET_NAMES = [
 
 
 # ==========================================
-# ZERODHA CONNECTION
+# MARKET DATA
 # ==========================================
-@st.cache_resource(ttl=1200, show_spinner=False)
-def get_kite_client():
-    try:
-        missing = [
-            key
-            for key in KITE_SECRET_NAMES
-            if not st.secrets.get(key)
-        ]
-
-        if missing:
-            st.session_state["kite_error"] = (
-                "Missing Streamlit secrets: "
-                + ", ".join(missing)
-            )
-            return None
-
-        return get_authenticated_kite(
-            api_key=st.secrets["KITE_API_KEY"],
-            api_secret=st.secrets["KITE_API_SECRET"],
-            user_id=st.secrets["KITE_USER_ID"],
-            password=st.secrets["KITE_PASSWORD"],
-            totp_secret=st.secrets["KITE_TOTP_SECRET"],
-        )
-
-    except Exception as exc:
-        st.session_state["kite_error"] = str(exc)
-        return None
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_nse_instrument_map():
-    kite = get_kite_client()
-
-    if kite is None:
-        return pd.DataFrame()
-
-    try:
-        instruments = kite.instruments("NSE")
-        instrument_df = pd.DataFrame(instruments)
-
-        if instrument_df.empty:
-            return pd.DataFrame()
-
-        required_columns = [
-            "tradingsymbol",
-            "instrument_token",
-        ]
-
-        if any(
-            column not in instrument_df.columns
-            for column in required_columns
-        ):
-            return pd.DataFrame()
-
-        if "segment" in instrument_df.columns:
-            instrument_df = instrument_df[
-                instrument_df["segment"].isin(
-                    ["NSE", "NSE-ETF"]
-                )
-            ].copy()
-
-        instrument_df["yahoo_symbol"] = (
-            instrument_df["tradingsymbol"]
-            .astype(str)
-            .str.upper()
-            + ".NS"
-        )
-
-        return instrument_df
-
-    except Exception as exc:
-        st.session_state["kite_error"] = str(exc)
-        return pd.DataFrame()
-
-
 def _period_to_days(period):
     return {
-        "1d": 3,
-        "5d": 10,
-        "1mo": 31,
-        "3mo": 93,
-        "6mo": 186,
-        "1y": 366,
-        "2y": 731,
-        "5y": 1826,
-        "10y": 3652,
+        "1d": 3, "5d": 10, "1mo": 31, "3mo": 93,
+        "6mo": 186, "1y": 366, "2y": 731,
+        "5y": 1826, "10y": 3652,
     }.get(period, 1826)
 
 
 def _clean_tickers(tickers):
     cleaned = []
-
     for ticker in tickers:
         if ticker is None:
             continue
-
         ticker = str(ticker).strip().upper()
-
         if not ticker:
             continue
-
-        if not ticker.endswith(".NS"):
+        if not ticker.endswith(".NS") and not ticker.startswith("^"):
             ticker = f"{ticker}.NS"
-
         if ticker not in cleaned:
             cleaned.append(ticker)
-
     return cleaned
 
 
-def fetch_from_zerodha(tickers, period="5y"):
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_market_data(tickers, period="5y"):
+    """Fetch daily historical data from Yahoo Finance."""
     requested = _clean_tickers(tickers)
-    kite = get_kite_client()
-    instruments = get_nse_instrument_map()
-
-    if kite is None or instruments.empty:
-        return pd.DataFrame(), requested
-
-    end_date = datetime.now()
-    start_date = end_date - timedelta(
-        days=_period_to_days(period)
-    )
-
-    prices = {}
-    unavailable = []
-
-    for ticker in requested:
-        matching = instruments[
-            instruments["yahoo_symbol"] == ticker
-        ]
-
-        if matching.empty:
-            unavailable.append(ticker)
-            continue
-
-        try:
-            instrument_token = int(
-                matching.iloc[0]["instrument_token"]
-            )
-
-            candles = kite.historical_data(
-                instrument_token=instrument_token,
-                from_date=start_date,
-                to_date=end_date,
-                interval="day",
-                continuous=False,
-                oi=False,
-            )
-
-            if not candles:
-                unavailable.append(ticker)
-                continue
-
-            candle_df = pd.DataFrame(candles)
-
-            if "date" not in candle_df.columns:
-                unavailable.append(ticker)
-                continue
-
-            if "close" not in candle_df.columns:
-                unavailable.append(ticker)
-                continue
-
-            candle_df["date"] = pd.to_datetime(
-                candle_df["date"]
-            )
-
-            candle_df = candle_df.set_index("date").sort_index()
-
-            prices[ticker] = candle_df["close"]
-
-            time.sleep(0.15)
-
-        except Exception:
-            unavailable.append(ticker)
-
-    if not prices:
-        return pd.DataFrame(), unavailable
-
-    return pd.DataFrame(prices).sort_index(), unavailable
-
-
-def fetch_from_yahoo(tickers, period="5y"):
-    requested = _clean_tickers(tickers)
-
     if not requested:
         return pd.DataFrame()
-
     try:
         data = yf.download(
-            tickers=requested,
-            period=period,
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            group_by="column",
+            tickers=requested, period=period, interval="1d",
+            auto_adjust=True, progress=False, group_by="column",
+            threads=True,
         )
-
         if data.empty:
             return pd.DataFrame()
-
         if isinstance(data.columns, pd.MultiIndex):
-            levels = data.columns.get_level_values(0)
-
-            if "Close" in levels:
-                prices = data["Close"]
-            elif "Adj Close" in levels:
-                prices = data["Adj Close"]
+            level0 = data.columns.get_level_values(0)
+            if "Close" in level0:
+                prices = data["Close"].copy()
+            elif "Adj Close" in level0:
+                prices = data["Adj Close"].copy()
             else:
                 return pd.DataFrame()
         else:
             if "Close" not in data.columns:
                 return pd.DataFrame()
-
             prices = data[["Close"]].copy()
-
             if len(requested) == 1:
                 prices.columns = [requested[0]]
-
         if isinstance(prices, pd.Series):
             prices = prices.to_frame(name=requested[0])
-
-        return prices
-
+        prices.index = pd.to_datetime(prices.index).tz_localize(None) if getattr(prices.index, "tz", None) is not None else pd.to_datetime(prices.index)
+        return prices.sort_index().ffill().bfill()
     except Exception:
         return pd.DataFrame()
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_market_data(tickers, period="5y"):
-    """
-    Data priority:
-    1. Zerodha
-    2. Yahoo Finance fallback
-    """
-    requested = _clean_tickers(tickers)
-
-    if not requested:
-        return pd.DataFrame()
-
-    zerodha_prices, unavailable = fetch_from_zerodha(
-        requested,
-        period=period,
-    )
-
-    yahoo_prices = fetch_from_yahoo(
-        unavailable,
-        period=period,
-    )
-
-    if zerodha_prices.empty and yahoo_prices.empty:
-        return pd.DataFrame()
-
-    if zerodha_prices.empty:
-        combined = yahoo_prices
-    elif yahoo_prices.empty:
-        combined = zerodha_prices
-    else:
-        combined = pd.concat(
-            [zerodha_prices, yahoo_prices],
-            axis=1,
-        )
-
-    combined = combined.loc[
-        :,
-        ~combined.columns.duplicated(),
-    ]
-
-    return combined.sort_index().ffill().bfill()
 
 
 # ==========================================
@@ -449,50 +245,96 @@ def _normalise_etf_symbol(symbol):
     return f"{symbol}.NS"
 
 
-def classify_etf(name, symbol):
-    text = f"{name} {symbol}".upper()
-    text = re.sub(r"[^A-Z0-9]+", " ", text)
+def _normalise_nse_text(value):
+    text = "" if value is None else str(value).upper()
+    return re.sub(r"[^A-Z0-9]+", " ", text).strip()
 
-    gold_terms = [
-        "GOLD", "GOLDBEES", "GOLD ETF", "GOLD FUND",
-    ]
-    liquid_terms = [
-        "LIQUID", "LIQUIDBEES", "OVERNIGHT", "MONEY MARKET",
-    ]
+
+def classify_etf(name, symbol, category="", sub_category=""):
+    """Assign an ETF to the app's main universe groups.
+
+    NSE's own category/sub-category fields are preferred. Name/symbol
+    heuristics are only a fallback when those fields are missing.
+    """
+    text = _normalise_nse_text(
+        f"{name} {symbol} {category} {sub_category}"
+    )
+    cat = _normalise_nse_text(category)
+    sub = _normalise_nse_text(sub_category)
+
+    gold_terms = ["GOLD", "GOLD ETF"]
+    liquid_terms = ["LIQUID", "LIQUIDBEES", "OVERNIGHT", "MONEY MARKET"]
     gsec_terms = [
         "GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY",
-        "GOV BOND", "GOVERNMENT BOND", "SOVEREIGN",
-    ]
-    defensive_terms = liquid_terms + gsec_terms + [
-        "BOND", "DEBT", "CORPORATE BOND", "AAA", "SILVER",
+        "GOV BOND", "SOVEREIGN", "STATE DEVELOPMENT LOAN",
     ]
     international_terms = [
-        "INTERNATIONAL", "GLOBAL", "WORLD", "NASDAQ", "S&P 500",
-        "SP 500", "S&P500", "MSCI", "HANG SENG", "CHINA", "JAPAN",
-        "EUROPE", "US EQUITY", "USA", "UNITED STATES",
-        "UNITED KINGDOM", "UK EQUITY", "GERMANY", "FRANCE", "TAIWAN",
-        "BRAZIL", "EMERGING MARKET", "NYSE",
+        "INTERNATIONAL", "WORLD", "GLOBAL", "NASDAQ", "S P 500",
+        "MSCI", "HANG SENG", "CHINA", "JAPAN", "EUROPE", "USA",
+        "UNITED STATES", "UNITED KINGDOM", "TAIWAN", "BRAZIL",
+        "EMERGING MARKET", "NYSE", "GERMANY", "FRANCE", "KOREA",
+        "DOW JONES", "FTSE", "SENSEX", "SP 500",
     ]
 
-    if any(term in text for term in gold_terms):
+    if any(term in text for term in gold_terms) or "GOLD" in cat or "GOLD" in sub:
         return "Defensive ETFs"
-    if any(term in text for term in defensive_terms):
+    if any(term in text for term in liquid_terms + gsec_terms):
         return "Defensive ETFs"
     if any(term in text for term in international_terms):
+        return "International ETFs"
+    if "WORLD" in cat or "INTERNATIONAL" in cat:
         return "International ETFs"
     return "Domestic ETFs"
 
 
-def classify_defensive_type(name, symbol):
-    text = f"{name} {symbol}".upper()
-    text = re.sub(r"[^A-Z0-9]+", " ", text)
-    if any(x in text for x in ["GOLD", "GOLDBEES"]):
+def classify_defensive_type(name, symbol, category="", sub_category=""):
+    text = _normalise_nse_text(
+        f"{name} {symbol} {category} {sub_category}"
+    )
+    if "GOLD" in text:
         return "Gold"
     if any(x in text for x in ["LIQUID", "LIQUIDBEES", "OVERNIGHT", "MONEY MARKET"]):
         return "LiquidBEES"
-    if any(x in text for x in ["GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY", "GOV BOND", "SOVEREIGN"]):
+    if any(x in text for x in [
+        "GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY",
+        "GOV BOND", "SOVEREIGN", "STATE DEVELOPMENT LOAN",
+    ]):
         return "G-Sec"
-    return "Other Defensive"
+    if any(x in text for x in ["DEBT", "BOND", "FIXED INCOME"]):
+        return "Other Defensive"
+    return ""
+
+
+def _derive_etf_category(name, symbol, category="", sub_category=""):
+    """Create a stable category label while retaining NSE's raw fields."""
+    text = _normalise_nse_text(
+        f"{name} {symbol} {category} {sub_category}"
+    )
+    raw = _normalise_nse_text(category)
+    sub = _normalise_nse_text(sub_category)
+
+    if "GOLD" in text:
+        return "Gold"
+    if "SILVER" in text:
+        return "Silver"
+    if any(x in text for x in [
+        "GSEC", "GILT", "GOVERNMENT", "GOVT", "TREASURY",
+        "BOND", "DEBT", "FIXED INCOME", "LIQUID", "OVERNIGHT",
+        "MONEY MARKET", "SOVEREIGN",
+    ]) or raw == "DEBT" or sub == "DEBT":
+        return "Debt"
+    if any(x in text for x in [
+        "INTERNATIONAL", "WORLD", "GLOBAL", "NASDAQ", "MSCI",
+        "HANG SENG", "CHINA", "JAPAN", "EUROPE", "USA",
+        "UNITED STATES", "UNITED KINGDOM", "TAIWAN", "BRAZIL",
+        "EMERGING MARKET", "FTSE", "DOW JONES", "KOREA",
+    ]):
+        return "World Indices"
+    if raw in {"EQUITY", "EQUITY ETF"} or sub == "EQUITY":
+        return "Equity"
+    if "EQUITY" in text:
+        return "Equity"
+    return "Other"
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -537,18 +379,37 @@ def load_nse_etf_catalog():
 
             seen.add(yahoo_symbol)
 
+            category = _get_first_value(
+                row, ["category", "Category", "CATEGORY"]
+            )
+            sub_category = _get_first_value(
+                row, [
+                    "subCategory", "sub-category", "subcategory",
+                    "Sub Category", "SUB-CATEGORY", "SUB_CATEGORY",
+                ]
+            )
+
             record = dict(row)
             record["symbol"] = yahoo_symbol
             record["name"] = name
-            record["group"] = classify_etf(name, symbol)
-            record["defensive_type"] = classify_defensive_type(name, symbol)
+            record["nse_category"] = category
+            record["nse_sub_category"] = sub_category
+            record["etf_category"] = _derive_etf_category(
+                name, symbol, category, sub_category
+            )
+            record["group"] = classify_etf(
+                name, symbol, category, sub_category
+            )
+            record["defensive_type"] = classify_defensive_type(
+                name, symbol, category, sub_category
+            )
             records.append(record)
 
         catalog = pd.DataFrame(records)
         if not catalog.empty:
             # Keep every field returned by NSE.  Put the fields used by the
             # strategy first, while preserving all other ETF metadata.
-            preferred = ["symbol", "name", "group", "defensive_type"]
+            preferred = ["symbol", "name", "etf_category", "nse_category", "nse_sub_category", "group", "defensive_type"]
             other = [c for c in catalog.columns if c not in preferred]
             catalog = catalog[preferred + other]
 
@@ -625,6 +486,68 @@ def get_defensive_catalog(defensive_type=None):
     if defensive_type:
         catalog = catalog[catalog["defensive_type"] == defensive_type]
     return catalog
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_nifty_constituent_catalog():
+    """Load official Nifty 500 and Nifty 200 constituent lists."""
+    frames = []
+    urls = {
+        "Nifty 500": "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+        "Nifty 200": "https://niftyindices.com/IndexConstituent/ind_nifty200list.csv",
+    }
+
+    for group_name, url in urls.items():
+        try:
+            session = requests.Session()
+            session.headers.update({"User-Agent": "Mozilla/5.0"})
+            response = session.get(url, timeout=15)
+            response.raise_for_status()
+            frame = pd.read_csv(io.StringIO(response.text))
+            if "Symbol" not in frame.columns:
+                continue
+            frame = frame.copy()
+            frame["Symbol"] = frame["Symbol"].astype(str).str.strip().str.upper()
+            frame["Ticker"] = frame["Symbol"] + ".NS"
+            frame["App Group"] = group_name
+            frames.append(frame)
+        except Exception:
+            continue
+
+    if not frames:
+        return pd.DataFrame(columns=["Symbol", "Ticker", "App Group"])
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def get_group_membership_catalog():
+    """Return a single table showing which stocks/ETFs belong to app groups."""
+    rows = []
+
+    constituent = get_nifty_constituent_catalog()
+    if not constituent.empty:
+        for _, row in constituent.iterrows():
+            rows.append({
+                "Group Type": "Stock Universe",
+                "App Group": row.get("App Group", ""),
+                "Symbol": row.get("Ticker", ""),
+                "Name": row.get("Company Name", row.get("Company Name", "")),
+                "Category": "Nifty constituent",
+            })
+
+    catalog = load_nse_etf_catalog()
+    if not catalog.empty:
+        for _, row in catalog.iterrows():
+            rows.append({
+                "Group Type": "ETF Universe",
+                "App Group": row.get("group", ""),
+                "Symbol": row.get("symbol", ""),
+                "Name": row.get("name", ""),
+                "Category": row.get("etf_category", ""),
+                "Defensive Type": row.get("defensive_type", ""),
+            })
+
+    return pd.DataFrame(rows)
 
 
 ASSET_GROUPS_MAPPING = {
@@ -843,7 +766,7 @@ def apply_entry_exit_ranks(
     exit_rank,
 ):
     """
-    Fixed rank-buffer logic with no separate buffer setting:
+    Entry/exit rank logic:
     - Existing holdings are retained while their rank is <= exit_rank.
     - New positions are selected only from the top entry_rank.
     - The portfolio is filled up to entry_rank positions.
@@ -870,155 +793,116 @@ def apply_entry_exit_ranks(
 
 
 def run_backtest_simulation(
-    strat_config,
-    initial_capital,
-    start_date,
-    end_date,
-    price_df=None,
-    benchmark_series=None,
-    signal_type="Ranking",
+    strat_config, initial_capital, start_date, end_date,
+    price_df=None, benchmark_series=None, signal_type="Ranking",
 ):
     if price_df is None or price_df.empty:
-        groups = strat_config.get(
-            "groups",
-            ["Nifty 500"],
-        )
+        tickers = get_trusted_tickers_by_group(strat_config.get("groups", ["Nifty 500"]))
+        price_df = fetch_market_data(tickers, period="5y")
 
-        tickers = get_trusted_tickers_by_group(groups)
-        price_df = fetch_market_data(
-            tickers,
-            period="5y",
-        )
-
-    sub_prices = price_df.loc[start_date:end_date]
-
-    if len(sub_prices) < 252:
+    if price_df.empty:
         return None
 
+    price_df = price_df.copy()
+    price_df.index = pd.to_datetime(price_df.index)
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    warmup_start = start_ts - pd.Timedelta(days=420)
+    work = price_df.loc[warmup_start:end_ts].copy()
+    if len(work) < 252:
+        return None
+
+    # Only selected groups participate in the ranking.
+    universe = get_trusted_tickers_by_group(strat_config.get("groups", ["Nifty 500"]))
+    universe = [t for t in universe if t in work.columns]
+    if not universe:
+        return None
+    work = work[universe].copy()
+
     try:
-        rebalance_dates = (
-            sub_prices
-            .resample("ME")
-            .first()
-            .index
-        )
+        rebalance_dates = work.loc[start_ts:end_ts].resample("ME").last().index
     except ValueError:
-        rebalance_dates = (
-            sub_prices
-            .resample("MS")
-            .first()
-            .index
-        )
+        rebalance_dates = work.loc[start_ts:end_ts].resample("M").last().index
+    rebalance_dates = list(rebalance_dates)
+    if not rebalance_dates:
+        return None
 
+    cash = float(initial_capital)
+    holdings = {}
     portfolio_history = []
-    current_cash = initial_capital
-    current_holdings = {}
+    entry_rank = int(strat_config.get("entry_rank", 10))
+    exit_rank = int(strat_config.get("exit_rank", 20))
+    ema_name = strat_config.get("moving_average", "200 EMA")
+    ema_period = None if ema_name == "None" else int(str(ema_name).split()[0])
+    pct_from_high = float(strat_config.get("pct_from_high", 15.0))
+    defensive_options = strat_config.get("defensive_options", {"LiquidBEES": [1], "G-Sec": [1], "Gold": True})
 
-    for i in range(len(rebalance_dates) - 1):
-        current_date = rebalance_dates[i]
-        history = sub_prices.loc[:current_date]
-
+    for current_date in rebalance_dates:
+        history = work.loc[:current_date].dropna(axis=1, how="all")
         if len(history) < 126:
             continue
 
-        total_value = current_cash
+        latest = history.iloc[-1]
+        candidates = history.columns.tolist()
 
-        for symbol, quantity in current_holdings.items():
-            if (
-                symbol in history.columns
-                and not np.isnan(
-                    history[symbol].iloc[-1]
-                )
-            ):
-                total_value += (
-                    quantity * history[symbol].iloc[-1]
-                )
+        if ema_period is not None:
+            ema = history.ewm(span=ema_period, adjust=False).mean().iloc[-1]
+            candidates = [c for c in candidates if pd.notna(latest.get(c)) and pd.notna(ema.get(c)) and latest[c] > ema[c]]
 
-        ranking_prices = history.drop(
-            columns=[
-                NIFTY_REGIME_TICKER,
-                GSEC_REGIME_TICKER,
-            ],
-            errors="ignore",
-        )
+        if pct_from_high > 0 and len(history) >= 252:
+            highs = history.iloc[-252:].max()
+            candidates = [c for c in candidates if pd.notna(highs.get(c)) and ((highs[c] - latest[c]) / highs[c] * 100) <= pct_from_high]
 
-        scores = get_momentum_scores(
-            ranking_prices,
-            signal_type=signal_type,
-            lookback_days=126,
-        )
+        ranking_prices = history[candidates] if candidates else history.iloc[:, 0:0]
+        scores = get_momentum_scores(ranking_prices, signal_type=signal_type, lookback_days=126)
+        ranked = scores.dropna().sort_values(ascending=False).index.tolist()
 
-        ranked_stocks = (
-            scores
-            .sort_values(ascending=False)
-            .dropna()
-            .index
-            .tolist()
-        )
+        selected = apply_entry_exit_ranks(list(holdings.keys()), ranked, entry_rank, exit_rank)
 
-        entry_rank = strat_config.get("entry_rank", 10)
-        exit_rank = strat_config.get("exit_rank", 20)
-
-        selected_stocks = apply_entry_exit_ranks(
-            list(current_holdings.keys()),
-            ranked_stocks,
-            entry_rank,
-            exit_rank,
-        )
-
-        if len(selected_stocks) < entry_rank:
-            fallback_needed = entry_rank - len(selected_stocks)
+        if len(selected) < entry_rank:
+            fallback_prices = history
             fallback = rank_defensive_etfs_with_multipliers(
-                prices_df=history,
-                target_count=fallback_needed,
-                lookback_days=126,
-                defensive_options=strat_config.get("defensive_options"),
+                fallback_prices, entry_rank - len(selected), 126, defensive_options
             )
             for item in fallback:
                 symbol = item["Symbol"]
-                if symbol not in selected_stocks:
-                    selected_stocks.append(symbol)
-                if len(selected_stocks) >= entry_rank:
+                if symbol in history.columns and symbol not in selected:
+                    selected.append(symbol)
+                if len(selected) >= entry_rank:
                     break
 
-            if selected_stocks:
-                allocation_per_stock = (
-                    total_value / len(selected_stocks)
-                )
+        selected = selected[:entry_rank]
 
-                current_holdings = {}
-                current_cash = total_value
+        # Rebalance equally among selected assets.
+        current_value = cash
+        for symbol, qty in holdings.items():
+            if symbol in latest.index and pd.notna(latest[symbol]):
+                current_value += qty * latest[symbol]
 
-                for symbol in selected_stocks:
-                    if symbol not in history.columns:
-                        continue
+        new_holdings = {}
+        new_cash = current_value
+        if selected:
+            per_asset = current_value / len(selected)
+            for symbol in selected:
+                px = latest.get(symbol)
+                if pd.notna(px) and float(px) > 0:
+                    qty = int(per_asset // float(px))
+                    if qty > 0:
+                        new_holdings[symbol] = qty
+                        new_cash -= qty * float(px)
+        holdings = new_holdings
+        cash = new_cash
 
-                    stock_price = history[symbol].iloc[-1]
-
-                    if stock_price > 0:
-                        quantity = int(
-                            allocation_per_stock // stock_price
-                        )
-
-                        if quantity > 0:
-                            current_holdings[symbol] = quantity
-                            current_cash -= (
-                                quantity * stock_price
-                            )
-
-        portfolio_history.append(
-            {
-                "Date": current_date,
-                "Portfolio Value": total_value,
-            }
-        )
+        portfolio_value = cash
+        for symbol, qty in holdings.items():
+            if symbol in latest.index and pd.notna(latest[symbol]):
+                portfolio_value += qty * latest[symbol]
+        if current_date >= start_ts:
+            portfolio_history.append({"Date": current_date, "Portfolio Value": float(portfolio_value)})
 
     if not portfolio_history:
         return None
-
-    return pd.DataFrame(
-        portfolio_history
-    ).set_index("Date")
+    return pd.DataFrame(portfolio_history).set_index("Date")
 
 
 # ==========================================
@@ -1026,94 +910,33 @@ def run_backtest_simulation(
 # ==========================================
 @st.cache_data(ttl=86400)
 def get_trusted_tickers_by_group(groups):
+    """Build the scanner universe from official Nifty constituent files + NSE ETF catalogue."""
     tickers = []
 
-    if (
-        "Nifty 500" in groups
-        or "Nifty 200" in groups
-    ):
-        official_url = (
-            "https://niftyindices.com/IndexConstituent/"
-            "ind_nifty500list.csv"
-        )
-
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-
-        try:
-            response = session.get(
-                official_url,
-                timeout=10,
-            )
-
-            if response.status_code == 200:
-                df = pd.read_csv(io.StringIO(response.text))
-
-                if "Symbol" in df.columns:
-                    n500 = [
-                        f"{str(sym).strip()}.NS"
-                        for sym in df["Symbol"]
-                        .dropna()
-                        .unique()
-                    ]
-
-                    if (
-                        "Nifty 200" in groups
-                        and "Nifty 500" not in groups
-                    ):
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
-        except Exception:
-            mirror_url = (
-                "https://raw.githubusercontent.com/"
-                "indian-stock-market/"
-                "nifty-500-constituents/"
-                "main/nifty500.csv"
-            )
-
-            try:
-                df = pd.read_csv(mirror_url)
-
-                if "Symbol" in df.columns:
-                    tickers.extend(
-                        [
-                            f"{str(sym).strip()}.NS"
-                            for sym in df["Symbol"]
-                            .dropna()
-                            .unique()
-                        ]
-                    )
-            except Exception:
+    if "Nifty 500" in groups or "Nifty 200" in groups:
+        constituents = get_nifty_constituent_catalog()
+        if not constituents.empty:
+            if "Nifty 500" in groups:
                 tickers.extend(
-                    [
-                        "RELIANCE.NS",
-                        "TCS.NS",
-                        "INFY.NS",
-                        "HDFCBANK.NS",
-                        "ICICIBANK.NS",
-                        "LT.NS",
-                        "SBIN.NS",
-                    ]
+                    constituents.loc[
+                        constituents["App Group"] == "Nifty 500", "Ticker"
+                    ].tolist()
+                )
+            if "Nifty 200" in groups:
+                tickers.extend(
+                    constituents.loc[
+                        constituents["App Group"] == "Nifty 200", "Ticker"
+                    ].tolist()
                 )
 
-    for group in groups:
-        if group in ETF_GROUP_NAMES:
-            tickers.extend(
-                get_etf_tickers(group)
-            )
-        elif group in ASSET_GROUPS_MAPPING:
-            tickers.extend(
-                ASSET_GROUPS_MAPPING[group]
-            )
+    for group in ["Domestic ETFs", "International ETFs", "All ETFs"]:
+        if group in groups:
+            tickers.extend(get_etf_tickers(group))
 
     if not tickers:
         tickers = [
-            "RELIANCE.NS",
-            "TCS.NS",
-            "INFY.NS",
-            "HDFCBANK.NS",
-            "ICICIBANK.NS",
+            "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS",
+            "ICICIBANK.NS", "NIFTYBEES.NS",
         ]
 
     return sorted(set(tickers))
@@ -1133,7 +956,6 @@ def run_strategy_stock_scanner(
     Portfolio rule:
       - Entry rank controls new entries.
       - Exit rank controls how far an existing holding can fall before exit.
-      - No user-configurable rank-buffer setting.
       - If fewer than Entry Rank stocks qualify, selected defensive assets are
         automatically used as fallback assets.
     """
@@ -1239,7 +1061,6 @@ def run_strategy_stock_scanner(
     stock_selection = ranked[:entry_rank]
 
     # Automatic defensive fallback only when there are not enough
-    # qualifying stocks. This is NOT an allocation multiplier.
     defensive_target = max(0, entry_rank - len(stock_selection))
     defensive_results = []
     if defensive_target > 0:
@@ -1485,30 +1306,9 @@ if "strategies" not in st.session_state:
 
 
 # ==========================================
-# SIDEBAR DATA PROVIDER STATUS
-# ==========================================
-primary_provider = (
-    "Zerodha Kite Connect"
-    if get_kite_client() is not None
-    else "Yahoo Finance fallback"
-)
-
-if primary_provider == "Zerodha Kite Connect":
-    st.sidebar.success("Primary data: Zerodha Kite")
-else:
-    st.sidebar.warning("Zerodha unavailable")
-    st.sidebar.info("Using Yahoo Finance fallback")
-
-if st.session_state.get("kite_error"):
-    st.sidebar.code(st.session_state["kite_error"])
-
-
-# ==========================================
 # NAVIGATION HEADER
 # ==========================================
-nav_col1, nav_col2, nav_col3, _ = st.columns(
-    [1.5, 2, 1.5, 3]
-)
+nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1.5, 2, 1.5, 1.2])
 
 with nav_col1:
     if st.button(
@@ -1551,7 +1351,82 @@ with nav_col3:
         st.session_state.navigation_tab = "BACKTEST"
         st.rerun()
 
+with nav_col4:
+    if st.button("⋯ MORE", use_container_width=True, type=("primary" if st.session_state.navigation_tab == "MORE" else "secondary")):
+        st.session_state.navigation_tab = "MORE"
+        st.rerun()
+
 st.markdown("---")
+
+
+# ==========================================
+# BACKTEST DATASET
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_market_data_chunked(tickers, period="5y", chunk_size=50):
+    """Fetch larger universes in smaller Yahoo Finance batches."""
+    requested = _clean_tickers(tickers)
+    frames = []
+    for start in range(0, len(requested), chunk_size):
+        chunk = requested[start:start + chunk_size]
+        data = fetch_market_data(chunk, period=period)
+        if not data.empty:
+            frames.append(data)
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, axis=1)
+    return result.loc[:, ~result.columns.duplicated()].sort_index().ffill().bfill()
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_historical_release_dataset():
+    """Load the public Nifty 500 historical dataset used by the backtest."""
+    try:
+        response = requests.get(DATA_URL_PARQUET, timeout=30)
+        response.raise_for_status()
+        frame = pd.read_parquet(io.BytesIO(response.content))
+    except Exception:
+        try:
+            response = requests.get(DATA_URL_CSV, timeout=30)
+            response.raise_for_status()
+            frame = pd.read_csv(io.BytesIO(response.content))
+        except Exception:
+            return pd.DataFrame()
+
+    if frame.empty:
+        return frame
+
+    # Normalize the date index.
+    date_column = next((c for c in frame.columns if str(c).lower() in {"date", "datetime"}), None)
+    if date_column is not None:
+        frame[date_column] = pd.to_datetime(frame[date_column], errors="coerce")
+        frame = frame.dropna(subset=[date_column]).set_index(date_column)
+    elif not isinstance(frame.index, pd.DatetimeIndex):
+        frame.index = pd.to_datetime(frame.index, errors="coerce")
+        frame = frame[~frame.index.isna()]
+
+    frame.index = pd.to_datetime(frame.index).tz_localize(None) if getattr(frame.index, "tz", None) is not None else pd.to_datetime(frame.index)
+    frame = frame.sort_index()
+
+    # Flatten possible MultiIndex columns.
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame.columns = [str(c[-1] if str(c[-1]) not in {"Close", "Adj Close"} else c[0]) for c in frame.columns]
+
+    # Keep close-price columns and normalize NSE symbols.
+    normalized = {}
+    for col in frame.columns:
+        name = str(col).strip().upper()
+        if name in {"DATE", "DATETIME"}:
+            continue
+        if name.endswith(".NS") or name.startswith("^"):
+            normalized[name] = frame[col]
+        else:
+            normalized[f"{name}.NS"] = frame[col]
+
+    result = pd.DataFrame(normalized, index=frame.index)
+    return result.apply(pd.to_numeric, errors="coerce").sort_index().ffill().bfill()
+
+
 
 
 # ==========================================
@@ -1985,28 +1860,49 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         gsec_3x = st.checkbox("3x", value=3 in existing_def.get("G-Sec", []), key="def_gsec_3")
     with d3:
         gold_defensive = st.checkbox("Gold ETF", value=bool(existing_def.get("Gold", True)), key="def_gold")
-        st.caption("Gold is ranked at 1x only — no multiplier.")
 
-    st.caption("Multipliers are used only to rank defensive alternatives. They do not change portfolio allocation.")
-
-    with st.expander("View all NSE ETF data", expanded=False):
+    with st.expander("📚 ETF Catalogue & Group Membership", expanded=False):
         catalog = get_etf_group_catalog()
         if not catalog.empty:
-            tabs = st.tabs(["All ETFs", "Domestic", "International", "Defensive", "Gold", "LiquidBEES", "G-Sec"])
-            frames = [
-                catalog,
-                catalog[catalog["group"] == "Domestic ETFs"],
-                catalog[catalog["group"] == "International ETFs"],
-                catalog[catalog["group"] == "Defensive ETFs"],
-                catalog[catalog["defensive_type"] == "Gold"],
-                catalog[catalog["defensive_type"] == "LiquidBEES"],
-                catalog[catalog["defensive_type"] == "G-Sec"],
+            category_values = [
+                x for x in catalog.get("etf_category", pd.Series(dtype=str)).dropna().unique()
             ]
-            for tab, frame in zip(tabs, frames):
+            category_tabs = ["All ETFs"] + sorted(category_values)
+            tabs = st.tabs(category_tabs)
+            for tab, category in zip(tabs, category_tabs):
                 with tab:
+                    if category == "All ETFs":
+                        frame = catalog
+                    else:
+                        frame = catalog[catalog["etf_category"] == category]
+                    st.dataframe(frame, use_container_width=True, hide_index=True)
+
+        st.markdown("### App Group Membership")
+        membership = get_group_membership_catalog()
+        if not membership.empty:
+            membership_tabs = st.tabs([
+                "Nifty 500", "Nifty 200", "Domestic ETFs",
+                "International ETFs", "All ETFs", "Defensive ETFs",
+            ])
+            membership_groups = [
+                "Nifty 500", "Nifty 200", "Domestic ETFs",
+                "International ETFs", "All ETFs", "Defensive ETFs",
+            ]
+            for tab, group in zip(membership_tabs, membership_groups):
+                with tab:
+                    if group == "All ETFs":
+                        frame = membership[membership["Group Type"] == "ETF Universe"]
+                    elif group == "Defensive ETFs":
+                        frame = membership[
+                            (membership["Group Type"] == "ETF Universe")
+                            & (membership["App Group"] == "Defensive ETFs")
+                        ]
+                    else:
+                        frame = membership[membership["App Group"] == group]
+                    st.write(f"**{len(frame):,} securities** in {group}")
                     st.dataframe(frame, use_container_width=True, hide_index=True)
         else:
-            st.warning("NSE ETF catalogue could not be loaded right now.")
+            st.warning("Group membership data could not be loaded right now.")
 
     st.markdown("---")
     st.markdown("#### Selection Criteria")
@@ -2068,14 +1964,6 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             max_value=100,
         )
 
-    with r3:
-        st.caption("No separate market-regime filter. The selected EMA is the only trend filter.")
-
-    st.info(
-        "Existing holdings stay invested until they fall below the Exit Rank. "
-        "New stocks enter only from the Entry Rank. There is no separate "
-        "rank-buffer setting."
-    )
 
     st.markdown("---")
     save_label = (
@@ -2151,11 +2039,48 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
 
 
 # ==========================================
+# MORE / GROUPS
+# ==========================================
+elif st.session_state.navigation_tab == "MORE":
+    st.title("⋯ MORE")
+    st.subheader("Group Membership")
+
+    membership = get_group_membership_catalog()
+    if membership.empty:
+        st.warning("Group membership data could not be loaded right now.")
+    else:
+        group_names = ["Nifty 500", "Nifty 200", "Domestic ETFs", "International ETFs", "All ETFs", "Defensive ETFs"]
+        tabs = st.tabs(group_names)
+        for tab, group in zip(tabs, group_names):
+            with tab:
+                if group == "All ETFs":
+                    frame = membership[membership["Group Type"] == "ETF Universe"]
+                elif group == "Defensive ETFs":
+                    frame = membership[(membership["Group Type"] == "ETF Universe") & (membership["App Group"] == "Defensive ETFs")]
+                else:
+                    frame = membership[membership["App Group"] == group]
+                st.metric("Members", len(frame))
+                st.dataframe(frame, use_container_width=True, hide_index=True)
+
+    st.markdown("### ETF Categories")
+    catalog = load_nse_etf_catalog()
+    if not catalog.empty:
+        categories = sorted(catalog["etf_category"].dropna().unique().tolist())
+        category_tabs = st.tabs(["All"] + categories)
+        for tab, category in zip(category_tabs, ["All"] + categories):
+            with tab:
+                frame = catalog if category == "All" else catalog[catalog["etf_category"] == category]
+                st.metric("ETFs", len(frame))
+                st.dataframe(frame, use_container_width=True, hide_index=True)
+
+
+
+
+# ==========================================
 # BACKTEST ENGINE
 # ==========================================
 elif st.session_state.navigation_tab == "BACKTEST":
     st.title("📈 BACKTEST STUDIO")
-    st.caption("Simulate historical momentum performance using the selected strategy universe.")
 
     strategy_names = list(st.session_state.strategies.keys())
     selected_strategy = st.selectbox("Select Base Strategy:", strategy_names)
@@ -2187,7 +2112,6 @@ elif st.session_state.navigation_tab == "BACKTEST":
             "Start Date:",
             value=datetime.now() - timedelta(days=365 * 3),
         )
-        st.caption("No separate 200 SMA regime filter — EMA is handled in Selection Criteria.")
 
     with bt3:
         end_date = st.date_input(
@@ -2204,14 +2128,23 @@ elif st.session_state.navigation_tab == "BACKTEST":
     if st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True):
         with st.spinner("Running backtest..."):
             release_df = load_historical_release_dataset()
+            benchmark_series = release_df.get("^NSEI") if not release_df.empty else None
+            stock_prices = release_df.drop(columns=["^NSEI"], errors="ignore") if not release_df.empty else pd.DataFrame()
 
-            benchmark_series = None
+            selected_groups = strategy_config.get("groups", ["Nifty 500"])
+            required_tickers = get_trusted_tickers_by_group(selected_groups)
 
-            if "^NSEI" in release_df.columns:
-                benchmark_series = release_df["^NSEI"]
-                stock_prices = release_df.drop(columns=["^NSEI"])
-            else:
-                stock_prices = release_df
+            # The release dataset is used when available; Yahoo fills any missing selected assets.
+            missing_tickers = [t for t in required_tickers if t not in stock_prices.columns]
+            if missing_tickers:
+                yahoo_prices = fetch_market_data_chunked(missing_tickers, period="5y", chunk_size=50)
+                if not yahoo_prices.empty:
+                    stock_prices = pd.concat([stock_prices, yahoo_prices], axis=1)
+                    stock_prices = stock_prices.loc[:, ~stock_prices.columns.duplicated()]
+
+            if stock_prices.empty:
+                st.error("Historical market data could not be loaded. Please try again.")
+                st.stop()
 
             result = run_backtest_simulation(
                 strat_config=strategy_config,
