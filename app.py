@@ -813,8 +813,33 @@ def run_backtest_simulation(
     if len(work) < 252:
         return None
 
-    # Only selected groups participate in the ranking.
-    universe = get_trusted_tickers_by_group(strat_config.get("groups", ["Nifty 500"]))
+    # Main groups participate in the ranking. Defensive instruments are kept
+    # alongside them so they can actually be selected as fallback assets.
+    main_universe = get_trusted_tickers_by_group(
+        strat_config.get("groups", ["Nifty 500"])
+    )
+    defensive_options = strat_config.get(
+        "defensive_options",
+        {"LiquidBEES": [1], "G-Sec": [1], "Gold": True},
+    )
+    defensive_universe = []
+    defensive_catalogs = {
+        "LiquidBEES": get_defensive_catalog("LiquidBEES"),
+        "G-Sec": get_defensive_catalog("G-Sec"),
+        "Gold": get_defensive_catalog("Gold"),
+    }
+    for defensive_type, catalog in defensive_catalogs.items():
+        enabled = (
+            bool(defensive_options.get("Gold", False))
+            if defensive_type == "Gold"
+            else bool(defensive_options.get(defensive_type, []))
+        )
+        if enabled and not catalog.empty:
+            defensive_universe.extend(
+                catalog["symbol"].dropna().astype(str).tolist()
+            )
+
+    universe = list(dict.fromkeys(main_universe + defensive_universe))
     universe = [t for t in universe if t in work.columns]
     if not universe:
         return None
@@ -844,7 +869,8 @@ def run_backtest_simulation(
             continue
 
         latest = history.iloc[-1]
-        candidates = history.columns.tolist()
+        defensive_symbols = set(defensive_universe)
+        candidates = [c for c in history.columns.tolist() if c not in defensive_symbols]
 
         if ema_period is not None:
             ema = history.ewm(span=ema_period, adjust=False).mean().iloc[-1]
@@ -2171,6 +2197,31 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
             selected_groups = strategy_config.get("groups", ["Nifty 500"])
             required_tickers = get_trusted_tickers_by_group(selected_groups)
+
+            # Defensive assets must always be available to the backtest because
+            # they are fallback instruments when the main ranking universe has
+            # fewer qualifying securities than Entry Rank.
+            defensive_options = strategy_config.get(
+                "defensive_options",
+                {"LiquidBEES": [1], "G-Sec": [1], "Gold": True},
+            )
+            defensive_catalogs = {
+                "LiquidBEES": get_defensive_catalog("LiquidBEES"),
+                "G-Sec": get_defensive_catalog("G-Sec"),
+                "Gold": get_defensive_catalog("Gold"),
+            }
+            for defensive_type, catalog in defensive_catalogs.items():
+                enabled = (
+                    bool(defensive_options.get("Gold", False))
+                    if defensive_type == "Gold"
+                    else bool(defensive_options.get(defensive_type, []))
+                )
+                if enabled and not catalog.empty:
+                    required_tickers.extend(
+                        catalog["symbol"].dropna().astype(str).tolist()
+                    )
+
+            required_tickers = list(dict.fromkeys(required_tickers))
 
             # The release dataset is used when available; Yahoo fills any missing selected assets.
             missing_tickers = [t for t in required_tickers if t not in stock_prices.columns]
