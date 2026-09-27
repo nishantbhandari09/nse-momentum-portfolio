@@ -598,7 +598,7 @@ if not ASSET_GROUPS_MAPPING["Gov Bond"]:
 # ==========================================
 def calculate_simple_momentum(
     price_df,
-    lookback_days=126,
+    lookback_days=120,
 ):
     if len(price_df) < lookback_days:
         return pd.Series(dtype=float)
@@ -610,7 +610,7 @@ def calculate_simple_momentum(
 
 def calculate_volatility_adjusted_momentum(
     price_df,
-    lookback_days=126,
+    lookback_days=120,
 ):
     if len(price_df) < lookback_days:
         return pd.Series(dtype=float)
@@ -661,7 +661,7 @@ def calculate_volatility_adjusted_momentum(
 def get_momentum_scores(
     price_df,
     signal_type="Returns",
-    lookback_days=126,
+    lookback_days=120,
 ):
     if signal_type == "Volatility":
         return calculate_volatility_adjusted_momentum(
@@ -693,7 +693,7 @@ def get_defensive_etf_tickers():
 def rank_defensive_etfs_with_multipliers(
     prices_df,
     target_count,
-    lookback_days=126,
+    lookback_days=120,
     defensive_options=None,
 ):
     """Rank selected defensive assets using only the user-selected multipliers."""
@@ -858,6 +858,9 @@ def run_backtest_simulation(
     portfolio_history = []
     entry_rank = int(strat_config.get("entry_rank", 10))
     exit_rank = int(strat_config.get("exit_rank", 20))
+    momentum_period = int(strat_config.get("momentum_period", 120))
+    if momentum_period not in (60, 90, 120, 252):
+        momentum_period = 120
     ema_name = strat_config.get("moving_average", "200 EMA")
     ema_period = None if ema_name == "None" else int(str(ema_name).split()[0])
     pct_from_high = float(strat_config.get("pct_from_high", 15.0))
@@ -865,7 +868,7 @@ def run_backtest_simulation(
 
     for current_date in rebalance_dates:
         history = work.loc[:current_date].dropna(axis=1, how="all")
-        if len(history) < 126:
+        if len(history) < momentum_period:
             continue
 
         latest = history.iloc[-1]
@@ -881,7 +884,7 @@ def run_backtest_simulation(
             candidates = [c for c in candidates if pd.notna(highs.get(c)) and ((highs[c] - latest[c]) / highs[c] * 100) <= pct_from_high]
 
         ranking_prices = history[candidates] if candidates else history.iloc[:, 0:0]
-        scores = get_momentum_scores(ranking_prices, signal_type=signal_type, lookback_days=126)
+        scores = get_momentum_scores(ranking_prices, signal_type=signal_type, lookback_days=momentum_period)
         ranked = scores.dropna().sort_values(ascending=False).index.tolist()
 
         selected = apply_entry_exit_ranks(list(holdings.keys()), ranked, entry_rank, exit_rank)
@@ -889,7 +892,7 @@ def run_backtest_simulation(
         if len(selected) < entry_rank:
             fallback_prices = history
             fallback = rank_defensive_etfs_with_multipliers(
-                fallback_prices, entry_rank - len(selected), 126, defensive_options
+                fallback_prices, entry_rank - len(selected), momentum_period, defensive_options
             )
             for item in fallback:
                 symbol = item["Symbol"]
@@ -988,8 +991,8 @@ def run_strategy_stock_scanner(
     Scan the selected stock/ETF universe.
 
     Core ranking:
-      1. Returns = raw trailing 126-day return
-      2. Volatility = return adjusted for annualised volatility and R²
+      1. Returns = raw trailing selected-period return
+      2. Volatility = return adjusted for annualised volatility and R² over the selected period
 
     Portfolio rule:
       - Entry rank controls new entries.
@@ -1081,11 +1084,15 @@ def run_strategy_stock_scanner(
         errors="ignore",
     )
 
+    momentum_period = int(strat.get("momentum_period", 120))
+    if momentum_period not in (60, 90, 120, 252):
+        momentum_period = 120
+
     signal_model = strat.get("signal_type", "Returns")
     scores = get_momentum_scores(
         filtered_df,
         signal_type=signal_model,
-        lookback_days=126,
+        lookback_days=momentum_period,
     )
 
     ranked = (
@@ -1105,7 +1112,7 @@ def run_strategy_stock_scanner(
         defensive_results = rank_defensive_etfs_with_multipliers(
             prices_df=prices_df,
             target_count=defensive_target,
-            lookback_days=126,
+            lookback_days=momentum_period,
             defensive_options=strat.get("defensive_options"),
         )
 
@@ -1338,6 +1345,7 @@ if "strategies" not in st.session_state:
             "use_rs": True,
             "rs_benchmark": "Nifty 500 / G-Sec",
             "signal_type": "Returns",
+            "momentum_period": 120,
             "positions": [],
             "previous_rebalance_symbols": [],
             "last_rebalance_symbols": [],
@@ -1971,7 +1979,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     st.markdown("---")
     st.markdown("#### Selection Criteria")
 
-    f1, f2, f3 = st.columns(3)
+    f1, f2, f3, f4 = st.columns(4)
 
     with f1:
         moving_average = st.selectbox(
@@ -2005,6 +2013,16 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
                 if edit_strat.get("signal_type", "Returns") == "Returns"
                 else 1
             ),
+        )
+
+    with f4:
+        saved_period = int(edit_strat.get("momentum_period", 120))
+        if saved_period not in [60, 90, 120, 252]:
+            saved_period = 120
+        momentum_period = st.selectbox(
+            "Momentum Period (days):",
+            [60, 90, 120, 252],
+            index=[60, 90, 120, 252].index(saved_period),
         )
 
     st.markdown("---")
@@ -2087,6 +2105,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "entry_rank": int(entry_rank),
             "exit_rank": int(exit_rank),
             "signal_type": signal_type,
+            "momentum_period": int(momentum_period),
             "pct_from_high": float(pct_from_high),
             "moving_average": moving_average,
             "defensive_options": defensive_options,
@@ -2170,6 +2189,14 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 else 1
             ),
         )
+        saved_bt_period = int(strategy_config.get("momentum_period", 120))
+        if saved_bt_period not in [60, 90, 120, 252]:
+            saved_bt_period = 120
+        momentum_period_bt = st.selectbox(
+            "Momentum Period (days):",
+            [60, 90, 120, 252],
+            index=[60, 90, 120, 252].index(saved_bt_period),
+        )
 
     with bt2:
         start_date = st.date_input(
@@ -2235,8 +2262,11 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 st.error("Historical market data could not be loaded. Please try again.")
                 st.stop()
 
+            backtest_config = dict(strategy_config)
+            backtest_config["momentum_period"] = int(momentum_period_bt)
+
             result = run_backtest_simulation(
-                strat_config=strategy_config,
+                strat_config=backtest_config,
                 initial_capital=initial_capital,
                 start_date=start_date.strftime("%Y-%m-%d"),
                 end_date=end_date.strftime("%Y-%m-%d"),
