@@ -9,6 +9,14 @@ import requests
 import streamlit as st
 import yfinance as yf
 
+try:
+    from fyers_apiv3 import accessToken, fyersModel
+    FYERS_SDK_AVAILABLE = True
+except Exception:
+    accessToken = None
+    fyersModel = None
+    FYERS_SDK_AVAILABLE = False
+
 
 
 # ==========================================
@@ -109,13 +117,12 @@ ETF_FALLBACK_TICKERS = [
     "BANKBEES.NS",
 ]
 
-KITE_SECRET_NAMES = [
-    "KITE_API_KEY",
-    "KITE_API_SECRET",
-    "KITE_USER_ID",
-    "KITE_PASSWORD",
-    "KITE_TOTP_SECRET",
+FYERS_SECRET_NAMES = [
+    "FYERS_APP_ID",
+    "FYERS_SECRET_ID",
+    "FYERS_REDIRECT_URI",
 ]
+
 
 
 # ==========================================
@@ -144,16 +151,194 @@ def _clean_tickers(tickers):
     return cleaned
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_market_data(tickers, period="5y"):
-    """Fetch daily historical data from Yahoo Finance."""
+def _fyers_symbol(ticker):
+    """Convert the app's Yahoo-style NSE symbol into FYERS v3 format."""
+    ticker = str(ticker).upper().strip()
+    if ticker.endswith(".NS"):
+        ticker = ticker[:-3]
+    if ticker.startswith("^"):
+        return None
+    return f"NSE:{ticker}-EQ"
+
+
+def _get_secret(name, default=""):
+    try:
+        value = st.secrets.get(name, default)
+        return str(value).strip() if value is not None else default
+    except Exception:
+        return default
+
+
+def _fyers_credentials_available():
+    return FYERS_SDK_AVAILABLE and all(_get_secret(k) for k in FYERS_SECRET_NAMES)
+
+
+def _get_fyers_login_url():
+    if not _fyers_credentials_available():
+        return None
+    session = accessToken.SessionModel(
+        client_id=_get_secret("FYERS_APP_ID"),
+        redirect_uri=_get_secret("FYERS_REDIRECT_URI"),
+        response_type="code",
+        grant_type="authorization_code",
+        state="strategy-engine",
+        secret_key=_get_secret("FYERS_SECRET_ID"),
+    )
+    return session.generate_authcode()
+
+
+def _exchange_fyers_auth_code(auth_code):
+    if not _fyers_credentials_available() or not auth_code:
+        return None, "FYERS credentials or auth code are missing."
+    try:
+        session = accessToken.SessionModel(
+            client_id=_get_secret("FYERS_APP_ID"),
+            redirect_uri=_get_secret("FYERS_REDIRECT_URI"),
+            response_type="code",
+            grant_type="authorization_code",
+            state="strategy-engine",
+            secret_key=_get_secret("FYERS_SECRET_ID"),
+        )
+        session.set_token(auth_code)
+        response = session.generate_token()
+        token = response.get("access_token") if isinstance(response, dict) else None
+        if token:
+            return token, ""
+        return None, str(response)
+    except Exception as exc:
+        return None, str(exc)
+
+
+def get_fyers_access_token():
+    """Use the daily token in Streamlit session state; exchange auth_code after FYERS redirects back."""
+    if not _fyers_credentials_available():
+        return None
+
+    existing = st.session_state.get("fyers_access_token")
+    if existing:
+        return existing
+
+    try:
+        auth_code = st.query_params.get("auth_code") or st.query_params.get("code")
+    except Exception:
+        auth_code = None
+
+    if auth_code:
+        token, error = _exchange_fyers_auth_code(auth_code)
+        if token:
+            st.session_state["fyers_access_token"] = token
+            st.session_state.pop("fyers_error", None)
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            return token
+        st.session_state["fyers_error"] = error
+
+    return None
+
+
+def get_fyers_client():
+    token = get_fyers_access_token()
+    if not token or not FYERS_SDK_AVAILABLE:
+        return None
+    try:
+        return fyersModel.FyersModel(
+            client_id=_get_secret("FYERS_APP_ID"),
+            token=token,
+            is_async=False,
+            log_path="",
+        )
+    except Exception as exc:
+        st.session_state["fyers_error"] = str(exc)
+        return None
+
+
+def _fyers_date_chunks(period):
+    days = _period_to_days(period)
+    end = datetime.now().date()
+    start = end - timedelta(days=days)
+    chunks = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + timedelta(days=365), end)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + timedelta(days=1)
+    return chunks
+
+
+def _fetch_one_fyers_symbol(client, ticker, period):
+    fyers_symbol = _fyers_symbol(ticker)
+    if not fyers_symbol:
+        return pd.Series(dtype=float)
+
+    parts = []
+    for chunk_start, chunk_end in _fyers_date_chunks(period):
+        try:
+            response = client.history(data={
+                "symbol": fyers_symbol,
+                "resolution": "D",
+                "date_format": "1",
+                "range_from": chunk_start.strftime("%Y-%m-%d"),
+                "range_to": chunk_end.strftime("%Y-%m-%d"),
+                "cont_flag": "1",
+                "oi_flag": "0",
+            })
+            candles = response.get("candles", []) if isinstance(response, dict) else []
+            if candles:
+                frame = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"][:len(candles[0])])
+                frame["date"] = pd.to_datetime(frame["epoch"], unit="s", errors="coerce")
+                frame = frame.dropna(subset=["date"]).set_index("date")
+                parts.append(frame["close"].astype(float))
+        except Exception:
+            continue
+
+    if not parts:
+        return pd.Series(dtype=float)
+    return pd.concat(parts).sort_index()[~pd.concat(parts).sort_index().index.duplicated(keep="last")]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_from_fyers(tickers, period="5y", _access_token=None):
+    """Primary historical-data source: FYERS API v3."""
+    if not _access_token or not FYERS_SDK_AVAILABLE:
+        return pd.DataFrame(), _clean_tickers(tickers)
+
+    client = fyersModel.FyersModel(
+        client_id=_get_secret("FYERS_APP_ID"),
+        token=_access_token,
+        is_async=False,
+        log_path="",
+    )
+    requested = _clean_tickers(tickers)
+    prices = {}
+    unavailable = []
+
+    for ticker in requested:
+        series = _fetch_one_fyers_symbol(client, ticker, period)
+        if series.empty:
+            unavailable.append(ticker)
+        else:
+            prices[ticker] = series
+
+    if not prices:
+        return pd.DataFrame(), unavailable
+    return pd.DataFrame(prices).sort_index(), unavailable
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_from_yahoo(tickers, period="5y"):
     requested = _clean_tickers(tickers)
     if not requested:
         return pd.DataFrame()
     try:
         data = yf.download(
-            tickers=requested, period=period, interval="1d",
-            auto_adjust=True, progress=False, group_by="column",
+            tickers=requested,
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+            group_by="column",
             threads=True,
         )
         if data.empty:
@@ -174,10 +359,40 @@ def fetch_market_data(tickers, period="5y"):
                 prices.columns = [requested[0]]
         if isinstance(prices, pd.Series):
             prices = prices.to_frame(name=requested[0])
-        prices.index = pd.to_datetime(prices.index).tz_localize(None) if getattr(prices.index, "tz", None) is not None else pd.to_datetime(prices.index)
+        prices.index = pd.to_datetime(prices.index)
+        if getattr(prices.index, "tz", None) is not None:
+            prices.index = prices.index.tz_localize(None)
         return prices.sort_index().ffill().bfill()
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_market_data(tickers, period="5y"):
+    """FYERS first; Yahoo Finance is retained only as a fallback for unavailable symbols."""
+    requested = _clean_tickers(tickers)
+    if not requested:
+        return pd.DataFrame()
+
+    token = get_fyers_access_token()
+    fyers_prices, unavailable = fetch_from_fyers(
+        requested,
+        period=period,
+        _access_token=token,
+    )
+
+    yahoo_prices = fetch_from_yahoo(unavailable if token else requested, period=period)
+
+    if fyers_prices.empty and yahoo_prices.empty:
+        return pd.DataFrame()
+    if fyers_prices.empty:
+        combined = yahoo_prices
+    elif yahoo_prices.empty:
+        combined = fyers_prices
+    else:
+        combined = pd.concat([fyers_prices, yahoo_prices], axis=1)
+
+    return combined.loc[:, ~combined.columns.duplicated()].sort_index().ffill().bfill()
 
 
 # ==========================================
@@ -1352,6 +1567,35 @@ if "strategies" not in st.session_state:
         }
     }
 
+
+# ==========================================
+# FYERS CONNECTION STATUS
+# ==========================================
+fyers_token = get_fyers_access_token()
+
+with st.sidebar:
+    st.markdown("### 🔌 FYERS Data Connection")
+    if not FYERS_SDK_AVAILABLE:
+        st.error("FYERS SDK is not installed. Add fyers-apiv3 to requirements.txt.")
+    elif not _fyers_credentials_available():
+        st.warning("FYERS credentials are missing from Streamlit Secrets.")
+        st.caption("Add FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI.")
+    elif fyers_token:
+        st.success("FYERS connected")
+        if st.button("Disconnect FYERS", use_container_width=True):
+            st.session_state.pop("fyers_access_token", None)
+            st.rerun()
+    else:
+        login_url = _get_fyers_login_url()
+        if login_url:
+            st.link_button("🔐 Connect / Login to FYERS", login_url, use_container_width=True)
+            st.caption("FYERS login is required for primary market data. The daily access token is kept only in this browser session.")
+        else:
+            st.warning("FYERS login URL could not be created.")
+
+    if st.session_state.get("fyers_error"):
+        st.error("FYERS login error")
+        st.code(st.session_state["fyers_error"])
 
 # ==========================================
 # NAVIGATION HEADER
