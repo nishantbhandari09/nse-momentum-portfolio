@@ -1,7 +1,9 @@
+.streamlit/secrets.toml
+
+data/
+*.parquet
+
 __pycache__/
 *.pyc
+
 .env
-.streamlit/secrets.toml
-data_cache/
-*.parquet
-*.log
