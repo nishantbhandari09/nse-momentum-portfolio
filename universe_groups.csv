@@ -1,14 +1,9 @@
 symbol,name,group,sub_group,asset_type,fyers_symbol,custom_multiplier_enabled
-RELIANCE,Reliance Industries,NSE Equity,Nifty 50,Equity,NSE:RELIANCE-EQ,0
-TCS,Tata Consultancy Services,NSE Equity,Nifty 50,Equity,NSE:TCS-EQ,0
-HDFCBANK,HDFC Bank,NSE Equity,Nifty 50,Equity,NSE:HDFCBANK-EQ,0
-ICICIBANK,ICICI Bank,NSE Equity,Nifty 50,Equity,NSE:ICICIBANK-EQ,0
-INFY,Infosys,NSE Equity,Nifty 50,Equity,NSE:INFY-EQ,0
-BHARTIARTL,Bharti Airtel,NSE Equity,Nifty 50,Equity,NSE:BHARTIARTL-EQ,0
-ITC,ITC,NSE Equity,Nifty 50,Equity,NSE:ITC-EQ,0
-SBIN,State Bank of India,NSE Equity,Nifty 50,Equity,NSE:SBIN-EQ,0
-LT,Larsen & Toubro,NSE Equity,Nifty 50,Equity,NSE:LT-EQ,0
-BAJFINANCE,Bajaj Finance,NSE Equity,Nifty 50,Equity,NSE:BAJFINANCE-EQ,0
-GOLDBEES,Nippon India ETF Gold BeES,Custom Defensive,Gold,ETF,NSE:GOLDBEES-EQ,1
-LIQUIDBEES,Nippon India ETF Liquid BeES,Custom Defensive,LiquidBees,ETF,NSE:LIQUIDBEES-EQ,1
-GSEC10YEAR,10 Year Government Security,Custom Defensive,G-Sec,ETF,NSE:GSEC10YEAR-EQ,1
+RELIANCE,Reliance Industries,Nifty 500,Energy,Equity,NSE:RELIANCE-EQ,False
+TCS,Tata Consultancy Services,Nifty 500,IT,Equity,NSE:TCS-EQ,False
+INFY,Infosys,Nifty 500,IT,Equity,NSE:INFY-EQ,False
+HDFCBANK,HDFC Bank,Nifty 500,Banking,Equity,NSE:HDFCBANK-EQ,False
+ICICIBANK,ICICI Bank,Nifty 500,Banking,Equity,NSE:ICICIBANK-EQ,False
+GOLDBEES,Gold ETF,Defensive,Gold,ETF,NSE:GOLDBEES-EQ,True
+LIQUIDBEES,Nippon Liquid ETF,Defensive,LiquidBees,ETF,NSE:LIQUIDBEES-EQ,True
+GSEC,G-Sec ETF,Defensive,G-Sec,ETF,NSE:GSEC-EQ,True
