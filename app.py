@@ -1,9 +1,7 @@
-from __future__ import annotations
-
-import json
+import io
+import os
+import zipfile
 from datetime import date, timedelta
-from pathlib import Path
-from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -14,1881 +12,1055 @@ from fyers_data import (
     clean_symbol,
     credentials_available,
     exchange_auth_code,
-    fetch_prices,
-    get_fyers_access_token,
-    get_profile,
+    fetch_symbol_history,
+    get_access_token,
+)
+
+from universe_manager import (
+    ensure_data_directories,
+    load_current_universe,
+    load_historical_constituents,
+    load_price_data,
+    load_index_data,
+    save_price_data,
+    save_index_data,
+    get_saved_date_range,
+)
+
+from backtest_engine import (
+    calculate_market_entry_control,
+    run_backtest,
 )
 
 
 # ============================================================
-# APP CONFIG
+# PAGE
 # ============================================================
 
 st.set_page_config(
-    page_title="NSE Momentum Portfolio",
+    page_title="FYERS Momentum Portfolio",
     page_icon="📈",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    layout="wide"
+)
+
+ensure_data_directories()
+
+
+# ============================================================
+# TITLE
+# ============================================================
+
+st.title("📈 FYERS Momentum Portfolio & Backtest")
+
+st.caption(
+    "FYERS historical data • Point-in-time universe • "
+    "Momentum ranking • Market entry control • Backtesting"
 )
 
 
-APP_DIR = Path(__file__).resolve().parent
-
-GROUP_FILE = APP_DIR / "universe_groups.csv"
-
-
 # ============================================================
-# DEFAULT UNIVERSE
+# SESSION
 # ============================================================
 
-DEFAULT_UNIVERSE = [
-    "RELIANCE",
-    "TCS",
-    "HDFCBANK",
-    "ICICIBANK",
-    "INFY",
-    "BHARTIARTL",
-    "ITC",
-    "SBIN",
-    "LT",
-    "BAJFINANCE",
-    "HINDUNILVR",
-    "MARUTI",
-    "SUNPHARMA",
-    "TATASTEEL",
-    "TATAMOTORS",
-    "AXISBANK",
-    "NTPC",
-    "ONGC",
-    "POWERGRID",
-    "ADANIENT",
-    "COALINDIA",
-    "TITAN",
-    "ULTRACEMCO",
-    "WIPRO",
-    "NESTLEIND",
-    "GRASIM",
-    "TECHM",
-    "JSWSTEEL",
-    "HCLTECH",
-    "HEROMOTOCO",
-    "DRREDDY",
-    "CIPLA",
-    "APOLLOHOSP",
-    "BAJAJ-AUTO",
-    "EICHERMOT",
-    "BPCL",
-    "DIVISLAB",
-    "TATACONSUM",
-    "BRITANNIA",
-    "BEL",
-    "HAL",
-    "TRENT",
-    "VBL",
-]
-
-
-CUSTOM_DEFENSIVE = [
-    "GOLDBEES",
-    "LIQUIDBEES",
-    "GSEC10YEAR",
-]
-
-
-# ============================================================
-# BASIC HELPERS
-# ============================================================
-
-def normalize_symbols(values):
-
-    result = []
-
-    seen = set()
-
-    for value in values:
-
-        symbol = str(value).strip().upper()
-
-        symbol = symbol.replace(".NS", "")
-        symbol = symbol.replace("NSE:", "")
-        symbol = symbol.replace("-EQ", "")
-
-        if symbol and symbol not in seen:
-
-            result.append(symbol)
-
-            seen.add(symbol)
-
-    return result
-
-
-def parse_int_list(text):
-
-    values = []
-
-    for item in str(text).replace(";", ",").split(","):
-
-        item = item.strip()
-
-        if not item:
-            continue
-
-        try:
-
-            number = int(item)
-
-            if number > 0:
-                values.append(number)
-
-        except ValueError:
-
-            raise ValueError(
-                f"Invalid lookback value: {item}"
-            )
-
-    return values
-
-
-def parse_float_list(text):
-
-    values = []
-
-    for item in str(text).replace(";", ",").split(","):
-
-        item = item.strip()
-
-        if not item:
-            continue
-
-        try:
-
-            number = float(item)
-
-            if number >= 0:
-                values.append(number)
-
-        except ValueError:
-
-            raise ValueError(
-                f"Invalid weight value: {item}"
-            )
-
-    return values
-
-
-# ============================================================
-# LOAD GROUP CATALOG
-# ============================================================
-
-@st.cache_data
-def load_group_catalog():
-
-    if not GROUP_FILE.exists():
-
-        return pd.DataFrame(
-            columns=[
-                "symbol",
-                "name",
-                "group",
-                "sub_group",
-                "asset_type",
-                "fyers_symbol",
-                "custom_multiplier_enabled",
-            ]
-        )
-
-    try:
-
-        df = pd.read_csv(GROUP_FILE)
-
-        required = [
-            "symbol",
-            "name",
-            "group",
-            "sub_group",
-            "asset_type",
-            "fyers_symbol",
-            "custom_multiplier_enabled",
-        ]
-
-        for column in required:
-
-            if column not in df.columns:
-
-                df[column] = ""
-
-        df["symbol"] = (
-            df["symbol"]
-            .astype(str)
-            .str.upper()
-            .str.strip()
-        )
-
-        return df
-
-    except Exception:
-
-        return pd.DataFrame(
-            columns=[
-                "symbol",
-                "name",
-                "group",
-                "sub_group",
-                "asset_type",
-                "fyers_symbol",
-                "custom_multiplier_enabled",
-            ]
-        )
-
-
-catalog = load_group_catalog()
-
-
-# ============================================================
-# GROUP FUNCTIONS
-# ============================================================
-
-def get_group_names():
-
-    if catalog.empty:
-        return []
-
-    values = (
-        catalog["group"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-    )
-
-    return sorted(
-        [
-            value
-            for value in values
-            if value
-        ]
-    )
-
-
-def get_subgroup_names(group=None):
-
-    if catalog.empty:
-        return []
-
-    data = catalog.copy()
-
-    if group:
-
-        data = data[
-            data["group"] == group
-        ]
-
-    values = (
-        data["sub_group"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-    )
-
-    return sorted(
-        [
-            value
-            for value in values
-            if value
-        ]
-    )
-
-
-def get_symbols_for_group(
-    group,
-    subgroup=None,
-):
-
-    if catalog.empty:
-
-        return []
-
-    data = catalog[
-        catalog["group"] == group
-    ].copy()
-
-    if subgroup:
-
-        data = data[
-            data["sub_group"] == subgroup
-        ]
-
-    return normalize_symbols(
-        data["symbol"].tolist()
-    )
-
-
-def get_asset_metadata(symbol):
-
-    if catalog.empty:
-
-        return {
-            "group": "",
-            "sub_group": "",
-            "asset_type": "",
-            "name": symbol,
-        }
-
-    rows = catalog[
-        catalog["symbol"] == symbol
-    ]
-
-    if rows.empty:
-
-        return {
-            "group": "",
-            "sub_group": "",
-            "asset_type": "",
-            "name": symbol,
-        }
-
-    row = rows.iloc[0]
-
-    return {
-        "group": row.get("group", ""),
-        "sub_group": row.get("sub_group", ""),
-        "asset_type": row.get("asset_type", ""),
-        "name": row.get("name", symbol),
-    }
-
-
-# ============================================================
-# FYERS AUTH
-# ============================================================
-
-def get_current_auth_code():
-
-    query_params = st.query_params
-
-    auth_code = query_params.get(
-        "auth_code"
-    )
-
-    if isinstance(auth_code, list):
-
-        if auth_code:
-            return auth_code[0]
-
-        return None
-
-    return auth_code
-
-
-def fyers_login_section():
-
-    st.sidebar.subheader(
-        "🔐 FYERS Connection"
-    )
-
-    if not credentials_available():
-
-        st.sidebar.error(
-            "FYERS credentials are missing."
-        )
-
-        st.sidebar.caption(
-            "Add FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI in Replit Secrets."
-        )
-
-        return None
-
-    auth_code = get_current_auth_code()
-
-    if auth_code:
-
-        if (
-            st.session_state.get(
-                "processed_auth_code"
-            )
-            != auth_code
-        ):
-
-            token, error = exchange_auth_code(
-                auth_code
-            )
-
-            if token:
-
-                st.session_state[
-                    "fyers_access_token"
-                ] = token
-
-                st.session_state[
-                    "processed_auth_code"
-                ] = auth_code
-
-                st.query_params.clear()
-
-                st.rerun()
-
-            else:
-
-                st.sidebar.error(
-                    f"FYERS login failed: {error}"
-                )
-
-    token = st.session_state.get(
-        "fyers_access_token"
-    )
-
-    if token:
-
-        profile = get_profile(token)
-
-        if (
-            isinstance(profile, dict)
-            and profile.get("s") == "ok"
-        ):
-
-            st.sidebar.success(
-                "🟢 FYERS connected"
-            )
-
-            return token
-
-        else:
-
-            st.session_state.pop(
-                "fyers_access_token",
-                None
-            )
-
-    login_url = build_login_url()
-
-    if login_url:
-
-        st.sidebar.link_button(
-            "🔑 Login / Connect to FYERS",
-            login_url,
-            use_container_width=True,
-        )
-
-    st.sidebar.caption(
-        "FYERS access tokens are session/day dependent. "
-        "A fresh login may be required for a new trading session."
-    )
-
-    return None
-
-
-# ============================================================
-# RETURN CALCULATION
-# ============================================================
-
-def calculate_return_score(
-    prices,
-    as_of_date,
-    lookbacks,
-    weights,
-):
-
-    available = prices.index[
-        prices.index
-        <= pd.Timestamp(as_of_date)
-    ]
-
-    if len(available) == 0:
-
-        return pd.Series(dtype=float)
-
-    actual_date = available[-1]
-
-    idx = prices.index.get_loc(
-        actual_date
-    )
-
-    score_parts = []
-
-    valid_weights = []
-
-    for lookback, weight in zip(
-        lookbacks,
-        weights,
-    ):
-
-        if idx - lookback < 0:
-
-            continue
-
-        start_prices = prices.iloc[
-            idx - lookback
-        ]
-
-        end_prices = prices.iloc[
-            idx
-        ]
-
-        returns = (
-            end_prices / start_prices
-        ) - 1
-
-        returns = (
-            returns
-            .replace(
-                [np.inf, -np.inf],
-                np.nan,
-            )
-            .dropna()
-        )
-
-        if returns.empty:
-
-            continue
-
-        score_parts.append(
-            returns
-        )
-
-        valid_weights.append(
-            weight
-        )
-
-    if not score_parts:
-
-        return pd.Series(dtype=float)
-
-    weights_arr = np.asarray(
-        valid_weights,
-        dtype=float,
-    )
-
-    if weights_arr.sum() == 0:
-
-        weights_arr = (
-            np.ones(
-                len(weights_arr)
-            )
-            / len(weights_arr)
-        )
-
-    else:
-
-        weights_arr = (
-            weights_arr
-            / weights_arr.sum()
-        )
-
-    return_matrix = pd.concat(
-        score_parts,
-        axis=1,
-    )
-
-    return_matrix.columns = [
-        f"Return_{i}"
-        for i in range(
-            len(return_matrix.columns)
-        )
-    ]
-
-    composite = return_matrix.mul(
-        weights_arr,
-        axis=1,
-    ).sum(
-        axis=1,
-        skipna=True,
-    )
-
-    return composite.sort_values(
-        ascending=False
-    )
-
-
-# ============================================================
-# CUSTOM DEFENSIVE MULTIPLIERS
-# ============================================================
-
-def apply_defensive_multipliers(
-    scores,
-    multipliers,
-):
-
-    adjusted = scores.copy()
-
-    for symbol, multiplier in multipliers.items():
-
-        if symbol in adjusted.index:
-
-            adjusted.loc[symbol] = (
-                adjusted.loc[symbol]
-                * float(multiplier)
-            )
-
-    return adjusted.sort_values(
-        ascending=False
-    )
-
-
-# ============================================================
-# RANKING
-# ============================================================
-
-def rank_on_date(
-    prices,
-    as_of_date,
-    lookbacks,
-    weights,
-    defensive_multipliers=None,
-):
-
-    scores = calculate_return_score(
-        prices,
-        as_of_date,
-        lookbacks,
-        weights,
-    )
-
-    if scores.empty:
-
-        return pd.Series(dtype=float)
-
-    if defensive_multipliers:
-
-        scores = apply_defensive_multipliers(
-            scores,
-            defensive_multipliers,
-        )
-
-    ranks = scores.rank(
-        ascending=False,
-        method="min",
-    )
-
-    return ranks.sort_values()
-
-
-# ============================================================
-# REBALANCING
-# ============================================================
-
-def rebalance(
-    current_portfolio,
-    ranks,
-    target_n,
-    exit_rank,
-):
-
-    if ranks.empty:
-
-        return (
-            current_portfolio,
-            [],
-            [],
-        )
-
-    keep = [
-        symbol
-        for symbol in current_portfolio
-        if (
-            symbol in ranks.index
-            and ranks[symbol] < exit_rank
-        )
-    ]
-
-    exits = [
-        symbol
-        for symbol in current_portfolio
-        if symbol not in keep
-    ]
-
-    needed = max(
-        0,
-        target_n - len(keep),
-    )
-
-    entries = []
-
-    for symbol in ranks.index:
-
-        if symbol not in keep:
-
-            entries.append(symbol)
-
-            if len(entries) >= needed:
-
-                break
-
-    return (
-        keep + entries,
-        entries,
-        exits,
-    )
-
-
-# ============================================================
-# MONTH-END REBALANCING
-# ============================================================
-
-def monthly_rebalance_dates(
-    prices
-):
-
-    month_ends = (
-        prices
-        .resample("ME")
-        .last()
-        .index
-    )
-
-    dates = []
-
-    for month_end in month_ends:
-
-        available = prices.index[
-            prices.index
-            <= month_end
-        ]
-
-        if len(available):
-
-            dates.append(
-                available[-1]
-            )
-
-    return sorted(
-        set(dates)
-    )
-
-
-# ============================================================
-# BACKTEST
-# ============================================================
-
-def run_backtest(
-    prices,
-    lookbacks,
-    weights,
-    target_n,
-    exit_rank,
-    start_date,
-    defensive_multipliers=None,
-):
-
-    rebalance_dates = (
-        monthly_rebalance_dates(
-            prices
-        )
-    )
-
-    max_lookback = max(
-        lookbacks
-    )
-
-    valid_dates = []
-
-    for d in rebalance_dates:
-
-        idx = prices.index.get_loc(d)
-
-        if (
-            idx >= max_lookback
-            and d >= pd.Timestamp(
-                start_date
-            )
-        ):
-
-            valid_dates.append(d)
-
-    portfolio = []
-
-    rows = []
-
-    equity = 1.0
-
-    previous_date = None
-
-    previous_holdings = []
-
-    for current_date in valid_dates:
-
-        ranks = rank_on_date(
-            prices,
-            current_date,
-            lookbacks,
-            weights,
-            defensive_multipliers,
-        )
-
-        new_portfolio, entries, exits = (
-            rebalance(
-                portfolio,
-                ranks,
-                target_n,
-                exit_rank,
-            )
-        )
-
-        monthly_return = np.nan
-
-        if (
-            previous_date is not None
-            and previous_holdings
-        ):
-
-            valid_holdings = [
-                x
-                for x in previous_holdings
-                if x in prices.columns
-            ]
-
-            if valid_holdings:
-
-                prev_prices = prices.loc[
-                    previous_date,
-                    valid_holdings,
-                ]
-
-                curr_prices = prices.loc[
-                    current_date,
-                    valid_holdings,
-                ]
-
-                aligned = pd.concat(
-                    [
-                        prev_prices.rename(
-                            "prev"
-                        ),
-                        curr_prices.rename(
-                            "curr"
-                        ),
-                    ],
-                    axis=1,
-                ).dropna()
-
-                if not aligned.empty:
-
-                    monthly_return = float(
-                        (
-                            aligned["curr"]
-                            / aligned["prev"]
-                            - 1
-                        ).mean()
-                    )
-
-                    equity *= (
-                        1 + monthly_return
-                    )
-
-        rows.append(
-            {
-                "Date": current_date,
-                "Portfolio Size": len(
-                    new_portfolio
-                ),
-                "Holdings": ", ".join(
-                    new_portfolio
-                ),
-                "New Entries": ", ".join(
-                    entries
-                ),
-                "Exits": ", ".join(
-                    exits
-                ),
-                "Turnover": (
-                    len(entries)
-                    + len(exits)
-                ),
-                "Portfolio Return": (
-                    monthly_return
-                ),
-                "Equity": equity,
-            }
-        )
-
-        portfolio = new_portfolio
-
-        previous_date = current_date
-
-        previous_holdings = list(
-            new_portfolio
-        )
-
-    return pd.DataFrame(rows)
-
-
-# ============================================================
-# METRICS
-# ============================================================
-
-def portfolio_metrics(
-    history
-):
-
-    if history.empty:
-
-        return {
-            "CAGR": np.nan,
-            "Max Drawdown": np.nan,
-            "Avg Monthly Return": np.nan,
-            "Turnover": 0,
-        }
-
-    returns = history[
-        "Portfolio Return"
-    ].dropna()
-
-    equity = history[
-        "Equity"
-    ].dropna()
-
-    if equity.empty:
-
-        cagr = np.nan
-        max_dd = np.nan
-
-    else:
-
-        periods = max(
-            (
-                history["Date"].iloc[-1]
-                - history["Date"].iloc[0]
-            ).days
-            / 365.25,
-            1 / 365.25,
-        )
-
-        cagr = (
-            equity.iloc[-1]
-            ** (1 / periods)
-            - 1
-        )
-
-        peak = equity.cummax()
-
-        drawdown = (
-            equity / peak
-            - 1
-        )
-
-        max_dd = drawdown.min()
-
-    return {
-        "CAGR": cagr,
-        "Max Drawdown": max_dd,
-        "Avg Monthly Return": (
-            returns.mean()
-            if not returns.empty
-            else np.nan
-        ),
-        "Turnover": int(
-            history[
-                "Turnover"
-            ]
-            .fillna(0)
-            .sum()
-        ),
-    }
+if "access_token" not in st.session_state:
+    st.session_state.access_token = get_access_token()
+
+if "fyers_login" not in st.session_state:
+    st.session_state.fyers_login = False
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.title(
-    "📈 NSE Momentum Portfolio"
-)
-
-st.caption(
-    "FYERS-powered multi-period return ranking + monthly rebalancing + NSE/custom defensive groups"
-)
-
-
-# ------------------------------------------------------------
-# FYERS
-# ------------------------------------------------------------
-
-fyers_token = fyers_login_section()
-
-
-# ------------------------------------------------------------
-# STRATEGY
-# ------------------------------------------------------------
-
 with st.sidebar:
 
+    st.header("⚙️ Settings")
+
+    st.subheader("FYERS")
+
+    if credentials_available():
+
+        st.success(
+            "FYERS credentials detected"
+        )
+
+        if st.session_state.access_token:
+
+            st.success(
+                "Access token available"
+            )
+
+        else:
+
+            st.warning(
+                "Login required"
+            )
+
+            login_url = build_login_url()
+
+            if login_url:
+
+                st.link_button(
+                    "🔐 Login to FYERS",
+                    login_url
+                )
+
+    else:
+
+        st.error(
+            "FYERS credentials missing"
+        )
+
+        st.info(
+            "Add FYERS_APP_ID, FYERS_SECRET_ID "
+            "and FYERS_REDIRECT_URI to Streamlit secrets."
+        )
+
+    st.divider()
+
+    st.subheader("Backtest")
+
+    start_date = st.date_input(
+        "Start Date",
+        value=date(
+            2020,
+            1,
+            1
+        )
+    )
+
+    end_date = st.date_input(
+        "End Date",
+        value=date.today()
+    )
+
+
+# ============================================================
+# FYERS CALLBACK
+# ============================================================
+
+query_params = st.query_params
+
+auth_code = query_params.get(
+    "auth_code"
+)
+
+if auth_code:
+
+    try:
+
+        token = exchange_auth_code(
+            auth_code
+        )
+
+        st.session_state.access_token = token
+
+        st.success(
+            "FYERS login successful."
+        )
+
+        st.query_params.clear()
+
+    except Exception as e:
+
+        st.error(
+            f"FYERS login failed: {e}"
+        )
+
+
+# ============================================================
+# LOAD UNIVERSE
+# ============================================================
+
+current_universe = load_current_universe()
+
+historical_universe = load_historical_constituents()
+
+if current_universe.empty:
+
+    st.warning(
+        "universe_groups.csv is empty."
+    )
+
+
+# ============================================================
+# TABS
+# ============================================================
+
+tab1, tab2, tab3, tab4 = st.tabs(
+    [
+        "📊 Strategy",
+        "📥 Data Manager",
+        "🧪 Backtest",
+        "📚 Universe"
+    ]
+)
+
+
+# ============================================================
+# TAB 1 — STRATEGY
+# ============================================================
+
+with tab1:
+
     st.header(
-        "Strategy"
+        "Momentum Strategy"
     )
 
-    target_n = st.number_input(
-        "Target holdings / Entry Top N",
-        min_value=1,
-        max_value=500,
-        value=20,
-        step=1,
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        groups = ["All"]
+
+        if not current_universe.empty:
+            groups += sorted(
+                current_universe[
+                    "group"
+                ]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+
+        selected_group = st.selectbox(
+            "Universe / Group",
+            groups
+        )
+
+    with col2:
+
+        top_n = st.number_input(
+            "Top N Holdings",
+            min_value=1,
+            max_value=100,
+            value=10
+        )
+
+    with col3:
+
+        rebalance_frequency = st.selectbox(
+            "Rebalance",
+            [
+                "Monthly",
+                "Quarterly"
+            ]
+        )
+
+    st.subheader(
+        "Return Ranking"
     )
 
-    exit_rank = st.number_input(
-        "Exit when rank reaches",
-        min_value=2,
-        max_value=1000,
-        value=41,
-        step=1,
+    c1, c2, c3, c4 = st.columns(4)
+
+    with c1:
+        lb1 = st.number_input(
+            "Lookback 1",
+            min_value=20,
+            max_value=500,
+            value=252
+        )
+
+    with c2:
+        lb2 = st.number_input(
+            "Lookback 2",
+            min_value=20,
+            max_value=500,
+            value=120
+        )
+
+    with c3:
+        lb3 = st.number_input(
+            "Lookback 3",
+            min_value=20,
+            max_value=500,
+            value=90
+        )
+
+    with c4:
+        lb4 = st.number_input(
+            "Lookback 4",
+            min_value=20,
+            max_value=500,
+            value=60
+        )
+
+    st.write(
+        "Lookback Weights"
     )
 
-    lookback_text = st.text_input(
-        "Return lookback periods",
-        "252,120,90,60",
-    )
+    w1, w2, w3, w4 = st.columns(4)
 
-    weight_text = st.text_input(
-        "Return weights",
-        "40,30,20,10",
+    with w1:
+        weight1 = st.number_input(
+            "252D Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.40
+        )
+
+    with w2:
+        weight2 = st.number_input(
+            "120D Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.30
+        )
+
+    with w3:
+        weight3 = st.number_input(
+            "90D Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.20
+        )
+
+    with w4:
+        weight4 = st.number_input(
+            "60D Weight",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.10
+        )
+
+    volatility_weight = st.number_input(
+        "Volatility Penalty",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.05
     )
 
     st.divider()
 
-    st.header(
-        "Data"
+    # ========================================================
+    # DEFENSIVE
+    # ========================================================
+
+    st.subheader(
+        "🛡️ Defensive Group"
     )
 
-    end_date = st.date_input(
-        "Data end date",
-        value=date.today(),
+    defensive_enabled = st.checkbox(
+        "Enable Defensive Assets",
+        value=True
     )
 
-    start_date = st.date_input(
-        "Data start date",
-        value=(
-            end_date
-            - timedelta(days=365 * 5)
-        ),
-    )
+    defensive_multipliers = {}
 
-    delay = st.number_input(
-        "Delay between FYERS requests",
-        min_value=0.0,
-        max_value=2.0,
-        value=0.05,
-        step=0.05,
-    )
+    if defensive_enabled:
 
+        d1, d2, d3 = st.columns(3)
 
-# ============================================================
-# GROUP SELECTION
-# ============================================================
+        with d1:
 
-st.sidebar.divider()
-
-st.sidebar.header(
-    "Universe Groups"
-)
-
-group_names = get_group_names()
-
-if not group_names:
-
-    selected_groups = []
-
-else:
-
-    selected_groups = st.sidebar.multiselect(
-        "Select NSE / market groups",
-        options=group_names,
-        default=[
-            g
-            for g in [
-                "NSE Equity",
-                "Nifty 50",
-            ]
-            if g in group_names
-        ],
-    )
-
-
-selected_subgroups = []
-
-for group in selected_groups:
-
-    subgroups = get_subgroup_names(
-        group
-    )
-
-    if subgroups:
-
-        chosen = st.sidebar.multiselect(
-            f"{group} sub-groups",
-            options=subgroups,
-            default=[],
-            key=f"subgroup_{group}",
-        )
-
-        selected_subgroups.extend(
-            [
-                (
-                    group,
-                    subgroup
-                )
-                for subgroup in chosen
-            ]
-        )
-
-
-# ============================================================
-# CUSTOM DEFENSIVE GROUP
-# ============================================================
-
-st.sidebar.divider()
-
-st.sidebar.header(
-    "Custom Defensive Group"
-)
-
-include_defensive = st.sidebar.checkbox(
-    "Include Gold / G-Sec / LiquidBees",
-    value=False,
-)
-
-
-defensive_multipliers = {}
-
-
-if include_defensive:
-
-    st.sidebar.caption(
-        "Multiplier is applied to the return score before final ranking."
-    )
-
-    gold_weight = st.sidebar.selectbox(
-        "Gold weight",
-        [1.0, 2.0, 3.0],
-        index=0,
-    )
-
-    gsec_weight = st.sidebar.selectbox(
-        "G-Sec weight",
-        [1.0, 2.0, 3.0],
-        index=0,
-    )
-
-    liquid_weight = st.sidebar.selectbox(
-        "LiquidBees weight",
-        [1.0, 2.0, 3.0],
-        index=0,
-    )
-
-    defensive_multipliers = {
-        "GOLDBEES": gold_weight,
-        "GSEC10YEAR": gsec_weight,
-        "LIQUIDBEES": liquid_weight,
-    }
-
-
-# ============================================================
-# BUILD UNIVERSE
-# ============================================================
-
-universe = []
-
-
-for group in selected_groups:
-
-    # If subgroups have explicitly been selected,
-    # use those.
-    group_subgroups = [
-        subgroup
-        for g, subgroup
-        in selected_subgroups
-        if g == group
-    ]
-
-    if group_subgroups:
-
-        for subgroup in group_subgroups:
-
-            universe.extend(
-                get_symbols_for_group(
-                    group,
-                    subgroup,
-                )
+            gold_multiplier = st.selectbox(
+                "Gold",
+                [1.0, 2.0, 3.0],
+                index=0
             )
+
+        with d2:
+
+            gsec_multiplier = st.selectbox(
+                "G-Sec",
+                [1.0, 2.0, 3.0],
+                index=0
+            )
+
+        with d3:
+
+            liquid_multiplier = st.selectbox(
+                "LiquidBees",
+                [1.0, 2.0, 3.0],
+                index=0
+            )
+
+        defensive_multipliers = {
+            "GOLDBEES":
+                gold_multiplier,
+
+            "GSEC":
+                gsec_multiplier,
+
+            "LIQUIDBEES":
+                liquid_multiplier,
+        }
+
+    st.divider()
+
+    # ========================================================
+    # MARKET ENTRY CONTROL
+    # ========================================================
+
+    st.subheader(
+        "🚦 Market Entry Control"
+    )
+
+    market_control_enabled = st.checkbox(
+        "Enable Market Entry Control",
+        value=False
+    )
+
+    market_control_df = pd.DataFrame()
+
+    if market_control_enabled:
+
+        mc1, mc2 = st.columns(2)
+
+        with mc1:
+
+            index_options = [
+                "NIFTY 50",
+                "NIFTY 100",
+                "NIFTY 200",
+                "NIFTY 500",
+                "BANK NIFTY",
+            ]
+
+            selected_index = st.selectbox(
+                "Control Index",
+                index_options
+            )
+
+        with mc2:
+
+            indicator_type = st.selectbox(
+                "Indicator",
+                [
+                    "EMA",
+                    "SMA",
+                    "VSTOP"
+                ]
+            )
+
+        if indicator_type in [
+            "EMA",
+            "SMA"
+        ]:
+
+            period = st.number_input(
+                "Moving Average Period",
+                min_value=2,
+                max_value=500,
+                value=200
+            )
+
+            atr_period = 14
+            atr_multiplier = 2.0
+
+        else:
+
+            period = 200
+
+            atr_period = st.number_input(
+                "ATR Period",
+                min_value=2,
+                max_value=100,
+                value=14
+            )
+
+            atr_multiplier = st.number_input(
+                "VStop ATR Multiplier",
+                min_value=0.1,
+                max_value=10.0,
+                value=2.0,
+                step=0.1
+            )
+
+        st.info(
+            "When the selected index is below the selected "
+            "indicator, new entries are blocked. Existing "
+            "stocks continue to follow normal exit rules."
+        )
+
+
+# ============================================================
+# TAB 2 — DATA MANAGER
+# ============================================================
+
+with tab2:
+
+    st.header(
+        "📥 FYERS Historical Data Manager"
+    )
+
+    st.write(
+        "Download historical OHLCV data from FYERS and "
+        "store it locally for repeated backtesting."
+    )
+
+    if not st.session_state.access_token:
+
+        st.warning(
+            "Login to FYERS before downloading data."
+        )
 
     else:
 
-        universe.extend(
-            get_symbols_for_group(
-                group
-            )
-        )
-
-
-if include_defensive:
-
-    universe.extend(
-        CUSTOM_DEFENSIVE
-    )
-
-
-universe = normalize_symbols(
-    universe
-)
-
-
-# Fallback when no catalog has
-# yet been populated.
-
-if not universe:
-
-    universe = DEFAULT_UNIVERSE.copy()
-
-    if include_defensive:
-
-        universe.extend(
-            CUSTOM_DEFENSIVE
-        )
-
-    universe = normalize_symbols(
-        universe
-    )
-
-
-# ============================================================
-# VALIDATE STRATEGY
-# ============================================================
-
-try:
-
-    lookbacks = parse_int_list(
-        lookback_text
-    )
-
-    if not lookbacks:
-
-        raise ValueError(
-            "Enter at least one lookback period."
-        )
-
-    weights = parse_float_list(
-        weight_text
-    )
-
-    if len(weights) != len(
-        lookbacks
-    ):
-
-        raise ValueError(
-            "Number of weights must match number of lookbacks."
-        )
-
-except ValueError as exc:
-
-    st.error(str(exc))
-
-    st.stop()
-
-
-if exit_rank <= target_n:
-
-    st.warning(
-        "Exit rank is normally kept above Target N to create a holding buffer."
-    )
-
-
-# ============================================================
-# UNIVERSE SUMMARY
-# ============================================================
-
-st.info(
-    f"""
-**Universe:** {len(universe)} securities  
-**Entry:** Top {target_n}  
-**Exit buffer:** Rank {exit_rank}+  
-**Lookbacks:** {", ".join(map(str, lookbacks))} days  
-**Defensive group:** {"ON" if include_defensive else "OFF"}
-"""
-)
-
-
-# ============================================================
-# RUN
-# ============================================================
-
-if st.button(
-    "▶ Run / Update Data",
-    type="primary",
-    use_container_width=True,
-):
-
-    if not fyers_token:
-
-        st.error(
-            "Connect to FYERS before running the strategy."
-        )
-
-        st.stop()
-
-    if pd.Timestamp(
-        start_date
-    ) >= pd.Timestamp(
-        end_date
-    ):
-
-        st.error(
-            "Data start date must be before data end date."
-        )
-
-        st.stop()
-
-    with st.status(
-        "Updating data and running strategy...",
-        expanded=True,
-    ) as status:
-
-        st.write(
-            f"Requesting FYERS historical data for {len(universe)} securities..."
-        )
-
-        prices, unavailable = fetch_prices(
-            fyers_token,
-            tuple(universe),
-            str(start_date),
-            str(end_date),
-            float(delay),
-        )
-
-        if prices.empty:
-
-            status.update(
-                label="FYERS data failed",
-                state="error",
-            )
+        if current_universe.empty:
 
             st.error(
-                "FYERS returned no historical data."
+                "No symbols found in universe_groups.csv"
             )
 
-            st.stop()
+        else:
 
-        st.write(
-            f"Received data for {len(prices.columns)} securities."
-        )
-
-        if unavailable:
-
-            st.warning(
-                f"{len(unavailable)} securities returned no FYERS history."
+            all_symbols = (
+                current_universe[
+                    "symbol"
+                ]
+                .dropna()
+                .astype(str)
+                .str.upper()
+                .unique()
+                .tolist()
             )
 
-        st.write(
-            "Calculating return scores, rankings and monthly portfolio changes..."
-        )
+            data_mode = st.radio(
+                "Download Mode",
+                [
+                    "Single Symbol",
+                    "Entire Group"
+                ],
+                horizontal=True
+            )
 
-        history = run_backtest(
-            prices,
-            lookbacks,
-            weights,
-            int(target_n),
-            int(exit_rank),
-            str(start_date),
-            defensive_multipliers,
-        )
+            if data_mode == "Single Symbol":
 
-        st.session_state.update(
-            prices=prices,
-            history=history,
-            unavailable=unavailable,
-            universe=universe,
-            defensive_multipliers=(
-                defensive_multipliers
-            ),
-            last_config={
-                "target_n": int(target_n),
-                "exit_rank": int(exit_rank),
-                "lookbacks": lookbacks,
-                "weights": weights,
-            },
-        )
+                selected_symbol = st.selectbox(
+                    "Symbol",
+                    all_symbols
+                )
 
-        status.update(
-            label="Done",
-            state="complete",
-            expanded=False,
-        )
+                symbols_to_download = [
+                    selected_symbol
+                ]
+
+            else:
+
+                data_group = st.selectbox(
+                    "Group",
+                    sorted(
+                        current_universe[
+                            "group"
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+                )
+
+                symbols_to_download = (
+                    current_universe[
+                        current_universe[
+                            "group"
+                        ].astype(str)
+                        == data_group
+                    ]["symbol"]
+                    .dropna()
+                    .astype(str)
+                    .str.upper()
+                    .unique()
+                    .tolist()
+                )
+
+            d1, d2 = st.columns(2)
+
+            with d1:
+
+                download_start = st.date_input(
+                    "Historical Start",
+                    value=date(
+                        2018,
+                        1,
+                        1
+                    ),
+                    key="download_start"
+                )
+
+            with d2:
+
+                download_end = st.date_input(
+                    "Historical End",
+                    value=date.today(),
+                    key="download_end"
+                )
+
+            if st.button(
+                "⬇️ Fetch & Store Historical Data",
+                type="primary"
+            ):
+
+                progress = st.progress(0)
+
+                status = st.empty()
+
+                successful = []
+                failed = []
+
+                total = len(
+                    symbols_to_download
+                )
+
+                for i, symbol in enumerate(
+                    symbols_to_download
+                ):
+
+                    status.write(
+                        f"Downloading {symbol}..."
+                    )
+
+                    try:
+
+                        df = fetch_symbol_history(
+                            symbol=symbol,
+                            start_date=download_start,
+                            end_date=download_end,
+                            resolution="1D",
+                            access_token=
+                                st.session_state.access_token
+                        )
+
+                        if df.empty:
+
+                            failed.append(
+                                (
+                                    symbol,
+                                    "No data returned"
+                                )
+                            )
+
+                        else:
+
+                            save_price_data(
+                                symbol,
+                                df
+                            )
+
+                            successful.append(
+                                symbol
+                            )
+
+                    except Exception as e:
+
+                        failed.append(
+                            (
+                                symbol,
+                                str(e)
+                            )
+                        )
+
+                    progress.progress(
+                        int(
+                            ((i + 1) / total)
+                            * 100
+                        )
+                    )
+
+                status.empty()
+
+                st.success(
+                    f"Stored {len(successful)} symbols."
+                )
+
+                if failed:
+
+                    st.warning(
+                        f"{len(failed)} symbols failed."
+                    )
+
+                    st.dataframe(
+                        pd.DataFrame(
+                            failed,
+                            columns=[
+                                "symbol",
+                                "error"
+                            ]
+                        ),
+                        use_container_width=True
+                    )
+
+            st.divider()
+
+            st.subheader(
+                "Stored Data"
+            )
+
+            rows = []
+
+            for symbol in all_symbols:
+
+                first, last = get_saved_date_range(
+                    symbol
+                )
+
+                if first is not None:
+
+                    rows.append({
+                        "Symbol":
+                            symbol,
+                        "Start":
+                            first.date(),
+                        "End":
+                            last.date(),
+                    })
+
+            if rows:
+
+                stored_df = pd.DataFrame(
+                    rows
+                )
+
+                st.dataframe(
+                    stored_df,
+                    use_container_width=True
+                )
+
+                csv = stored_df.to_csv(
+                    index=False
+                ).encode()
+
+                st.download_button(
+                    "📥 Download Data Inventory",
+                    csv,
+                    "data_inventory.csv",
+                    "text/csv"
+                )
+
+            else:
+
+                st.info(
+                    "No historical data stored yet."
+                )
 
 
 # ============================================================
-# RESULTS
+# TAB 3 — BACKTEST
 # ============================================================
 
-if "history" not in st.session_state:
+with tab3:
 
-    st.warning(
-        "Select your universe and strategy settings, connect FYERS, then click Run / Update Data."
+    st.header(
+        "🧪 Backtest"
     )
 
-    st.stop()
+    if not st.session_state.access_token:
 
-
-prices = st.session_state[
-    "prices"
-]
-
-history = st.session_state[
-    "history"
-]
-
-unavailable = st.session_state.get(
-    "unavailable",
-    []
-)
-
-
-# ============================================================
-# METRICS
-# ============================================================
-
-metrics = portfolio_metrics(
-    history
-)
-
-latest_date = prices.index[-1].date()
-
-
-m1, m2, m3, m4, m5 = st.columns(5)
-
-
-m1.metric(
-    "Latest data",
-    latest_date.strftime(
-        "%d %b %Y"
-    ),
-)
-
-m2.metric(
-    "Securities",
-    len(prices.columns),
-)
-
-m3.metric(
-    "CAGR",
-    (
-        "—"
-        if pd.isna(
-            metrics["CAGR"]
+        st.warning(
+            "Login to FYERS first."
         )
-        else f"{metrics['CAGR']:.1%}"
-    ),
-)
 
-m4.metric(
-    "Max drawdown",
-    (
-        "—"
-        if pd.isna(
-            metrics["Max Drawdown"]
+    elif current_universe.empty:
+
+        st.error(
+            "Universe is empty."
         )
-        else f"{metrics['Max Drawdown']:.1%}"
-    ),
-)
 
-m5.metric(
-    "Turnover",
-    f"{metrics['Turnover']}",
-)
+    else:
+
+        if st.button(
+            "▶️ Run Backtest",
+            type="primary"
+        ):
+
+            with st.spinner(
+                "Preparing backtest..."
+            ):
+
+                # ------------------------------------------------
+                # REBALANCE DATES
+                # ------------------------------------------------
+
+                dates = pd.date_range(
+                    start=start_date,
+                    end=end_date,
+                    freq=(
+                        "ME"
+                        if rebalance_frequency
+                        == "Monthly"
+                        else "QE"
+                    )
+                )
+
+                # ------------------------------------------------
+                # LOAD PRICE DATA
+                # ------------------------------------------------
+
+                symbols = (
+                    current_universe[
+                        "symbol"
+                    ]
+                    .dropna()
+                    .astype(str)
+                    .str.upper()
+                    .unique()
+                    .tolist()
+                )
+
+                price_data = {}
+
+                missing = []
+
+                for symbol in symbols:
+
+                    df = load_price_data(
+                        symbol
+                    )
+
+                    if df.empty:
+
+                        missing.append(
+                            symbol
+                        )
+
+                    else:
+
+                        price_data[
+                            symbol
+                        ] = df
+
+                if not price_data:
+
+                    st.error(
+                        "No stored historical data found. "
+                        "Go to Data Manager and download FYERS data first."
+                    )
+
+                    st.stop()
+
+                # ------------------------------------------------
+                # MARKET INDEX
+                # ------------------------------------------------
+
+                if market_control_enabled:
+
+                    index_symbol = clean_symbol(
+                        selected_index
+                    )
+
+                    index_df = load_index_data(
+                        selected_index
+                    )
+
+                    # If index is not already stored,
+                    # fetch it automatically.
+                    if index_df.empty:
+
+                        st.info(
+                            f"Downloading {selected_index} "
+                            "historical index data..."
+                        )
+
+                        index_df = fetch_symbol_history(
+                            symbol=index_symbol,
+                            start_date=start_date,
+                            end_date=end_date,
+                            resolution="1D",
+                            access_token=
+                                st.session_state.access_token
+                        )
+
+                        if not index_df.empty:
+
+                            save_index_data(
+                                selected_index,
+                                index_df
+                            )
+
+                    if index_df.empty:
+
+                        st.error(
+                            "Unable to obtain index data."
+                        )
+
+                        st.stop()
+
+                    market_control_df = (
+                        calculate_market_entry_control(
+                            index_df,
+                            indicator_type=
+                                indicator_type,
+                            period=period,
+                            atr_period=atr_period,
+                            atr_multiplier=
+                                atr_multiplier
+                        )
+                    )
+
+                else:
+
+                    market_control_df = pd.DataFrame()
+
+                # ------------------------------------------------
+                # RUN ENGINE
+                # ------------------------------------------------
+
+                history_df, transactions_df = (
+                    run_backtest(
+                        price_data=price_data,
+                        rebalance_dates=dates,
+                        universe_df=
+                            historical_universe,
+                        selected_group=
+                            selected_group,
+                        top_n=top_n,
+                        lookbacks=(
+                            lb1,
+                            lb2,
+                            lb3,
+                            lb4
+                        ),
+                        weights=(
+                            weight1,
+                            weight2,
+                            weight3,
+                            weight4
+                        ),
+                        volatility_weight=
+                            volatility_weight,
+                        defensive_multipliers=
+                            defensive_multipliers,
+                        market_control_df=
+                            market_control_df,
+                        allow_market_entry_control=
+                            market_control_enabled,
+                    )
+                )
+
+                # ------------------------------------------------
+                # RESULTS
+                # ------------------------------------------------
+
+                st.success(
+                    "Backtest completed."
+                )
+
+                if not history_df.empty:
+
+                    st.subheader(
+                        "Monthly Portfolio"
+                    )
+
+                    st.dataframe(
+                        history_df,
+                        use_container_width=True
+                    )
+
+                    csv = history_df.to_csv(
+                        index=False
+                    ).encode()
+
+                    st.download_button(
+                        "📥 Download Portfolio History",
+                        csv,
+                        "portfolio_history.csv",
+                        "text/csv"
+                    )
+
+                if not transactions_df.empty:
+
+                    st.subheader(
+                        "Entries & Exits"
+                    )
+
+                    st.dataframe(
+                        transactions_df,
+                        use_container_width=True
+                    )
+
+                    csv = transactions_df.to_csv(
+                        index=False
+                    ).encode()
+
+                    st.download_button(
+                        "📥 Download Transactions",
+                        csv,
+                        "transactions.csv",
+                        "text/csv"
+                    )
+
+                if market_control_enabled:
+
+                    st.subheader(
+                        "🚦 Market Entry Control"
+                    )
+
+                    st.dataframe(
+                        market_control_df.tail(100),
+                        use_container_width=True
+                    )
+
+                    st.caption(
+                        "ENTRY BLOCKED means new stocks "
+                        "were not permitted. Existing "
+                        "holdings continued under normal "
+                        "exit logic."
+                    )
+
+                if missing:
+
+                    st.warning(
+                        f"{len(missing)} symbols have no "
+                        "stored historical data."
+                    )
 
 
 # ============================================================
-# CURRENT RANKING
+# TAB 4 — UNIVERSE
 # ============================================================
 
-latest_ranks = rank_on_date(
-    prices,
-    latest_date,
-    lookbacks,
-    weights,
-    defensive_multipliers,
-)
+with tab4:
 
-
-ranking_view = pd.DataFrame(
-    {
-        "Symbol":
-            latest_ranks.index,
-        "Rank":
-            latest_ranks.values,
-    }
-)
-
-
-ranking_view[
-    "Name"
-] = ranking_view[
-    "Symbol"
-].map(
-    lambda x:
-        get_asset_metadata(x)[
-            "name"
-        ]
-)
-
-
-ranking_view[
-    "Group"
-] = ranking_view[
-    "Symbol"
-].map(
-    lambda x:
-        get_asset_metadata(x)[
-            "group"
-        ]
-)
-
-
-ranking_view[
-    "Sub Group"
-] = ranking_view[
-    "Symbol"
-].map(
-    lambda x:
-        get_asset_metadata(x)[
-            "sub_group"
-        ]
-)
-
-
-ranking_view[
-    "Asset Type"
-] = ranking_view[
-    "Symbol"
-].map(
-    lambda x:
-        get_asset_metadata(x)[
-            "asset_type"
-        ]
-)
-
-
-ranking_view[
-    "Zone"
-] = np.select(
-    [
-        ranking_view[
-            "Rank"
-        ] <= target_n,
-
-        ranking_view[
-            "Rank"
-        ] < exit_rank,
-    ],
-    [
-        "ENTRY / TOP HOLDINGS",
-        "BUFFER / HOLD",
-    ],
-    default="EXIT ZONE",
-)
-
-
-st.subheader(
-    f"Current Ranking — {latest_date}"
-)
-
-
-st.dataframe(
-    ranking_view.head(
-        max(
-            int(exit_rank),
-            int(target_n)
-        ) + 20
-    ),
-    use_container_width=True,
-    hide_index=True,
-)
-
-
-# ============================================================
-# LATEST REBALANCE
-# ============================================================
-
-if not history.empty:
-
-    latest_rebalance = history.iloc[-1]
+    st.header(
+        "📚 Universe Management"
+    )
 
     st.subheader(
-        "Latest Monthly Rebalance"
+        "Current Universe"
     )
 
-    left, mid, right = st.columns(3)
+    if current_universe.empty:
 
-    with left:
-
-        st.markdown(
-            "**Current holdings**"
+        st.info(
+            "No universe data."
         )
 
-        holdings = (
-            latest_rebalance[
-                "Holdings"
-            ].split(", ")
-            if latest_rebalance[
-                "Holdings"
-            ]
-            else []
-        )
+    else:
 
         st.dataframe(
-            pd.DataFrame(
-                {
-                    "Holding":
-                        holdings
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
+            current_universe,
+            use_container_width=True
         )
-
-    with mid:
-
-        st.markdown(
-            "**New entries**"
-        )
-
-        entries = (
-            latest_rebalance[
-                "New Entries"
-            ].split(", ")
-            if latest_rebalance[
-                "New Entries"
-            ]
-            else []
-        )
-
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "New entry":
-                        entries
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with right:
-
-        st.markdown(
-            "**Exits**"
-        )
-
-        exits = (
-            latest_rebalance[
-                "Exits"
-            ].split(", ")
-            if latest_rebalance[
-                "Exits"
-            ]
-            else []
-        )
-
-        st.dataframe(
-            pd.DataFrame(
-                {
-                    "Exit":
-                        exits
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-
-# ============================================================
-# BACKTEST HISTORY
-# ============================================================
-
-st.subheader(
-    "Backtest / Rebalance History"
-)
-
-
-history_view = history.copy()
-
-
-history_view[
-    "Date"
-] = pd.to_datetime(
-    history_view["Date"]
-).dt.date
-
-
-history_view[
-    "Portfolio Return"
-] = history_view[
-    "Portfolio Return"
-].apply(
-    lambda x:
-        None
-        if pd.isna(x)
-        else f"{x:.2%}"
-)
-
-
-history_view[
-    "Equity"
-] = history_view[
-    "Equity"
-].apply(
-    lambda x:
-        f"{x:.3f}"
-)
-
-
-st.dataframe(
-    history_view,
-    use_container_width=True,
-    hide_index=True,
-)
-
-
-# ============================================================
-# GROUP BREAKDOWN
-# ============================================================
-
-st.subheader(
-    "Universe Group Breakdown"
-)
-
-
-group_breakdown = (
-    ranking_view
-    .groupby(
-        [
-            "Group",
-            "Sub Group",
-        ],
-        dropna=False,
-    )
-    .size()
-    .reset_index(
-        name="Securities"
-    )
-)
-
-
-st.dataframe(
-    group_breakdown,
-    use_container_width=True,
-    hide_index=True,
-)
-
-
-# ============================================================
-# DEFENSIVE SETTINGS
-# ============================================================
-
-if include_defensive:
 
     st.subheader(
-        "Custom Defensive Group"
+        "Historical Constituents"
     )
 
-    defensive_rows = []
+    if historical_universe.empty:
 
-    for symbol, multiplier in (
-        defensive_multipliers.items()
-    ):
-
-        metadata = get_asset_metadata(
-            symbol
+        st.warning(
+            "historical_constituents.csv is empty."
         )
 
-        defensive_rows.append(
-            {
-                "Symbol":
-                    symbol,
-
-                "Name":
-                    metadata[
-                        "name"
-                    ],
-
-                "Group":
-                    "Custom Defensive",
-
-                "Type":
-                    metadata[
-                        "sub_group"
-                    ],
-
-                "Ranking Weight":
-                    f"{multiplier:.1f}x",
-            }
+        st.info(
+            "For rigorous historical backtesting, "
+            "populate this file with the actual "
+            "constituent validity periods."
         )
 
-    st.dataframe(
-        pd.DataFrame(
-            defensive_rows
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
+    else:
 
-
-# ============================================================
-# UNAVAILABLE DATA
-# ============================================================
-
-if unavailable:
-
-    with st.expander(
-        "FYERS symbols with unavailable data"
-    ):
-
-        st.write(
-            unavailable
+        st.dataframe(
+            historical_universe,
+            use_container_width=True
         )
 
-
-# ============================================================
-# DOWNLOAD
-# ============================================================
-
-csv_history = history.to_csv(
-    index=False
-).encode(
-    "utf-8"
-)
-
-
-st.download_button(
-    "Download rebalance history CSV",
-    data=csv_history,
-    file_name=(
-        "momentum_rebalance_history.csv"
-    ),
-    mime="text/csv",
-)
-
-
-ranking_csv = ranking_view.to_csv(
-    index=False
-).encode(
-    "utf-8"
-)
-
-
-st.download_button(
-    "Download current ranking CSV",
-    data=ranking_csv,
-    file_name=(
-        "current_momentum_ranking.csv"
-    ),
-    mime="text/csv",
-)
-
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.caption(
-    "Market data: FYERS API. "
-    "Research/backtesting tool only. "
-    "No order placement is implemented."
-)
+        st.caption(
+            "The backtest uses valid_from and valid_to "
+            "to determine which securities were eligible "
+            "on each historical rebalance date."
+        )
