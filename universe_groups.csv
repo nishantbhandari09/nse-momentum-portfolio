@@ -1,9 +1,0 @@
-symbol,name,group,sub_group,asset_type,fyers_symbol,custom_multiplier_enabled
-RELIANCE,Reliance Industries,Nifty 500,Energy,Equity,NSE:RELIANCE-EQ,False
-TCS,Tata Consultancy Services,Nifty 500,IT,Equity,NSE:TCS-EQ,False
-INFY,Infosys,Nifty 500,IT,Equity,NSE:INFY-EQ,False
-HDFCBANK,HDFC Bank,Nifty 500,Banking,Equity,NSE:HDFCBANK-EQ,False
-ICICIBANK,ICICI Bank,Nifty 500,Banking,Equity,NSE:ICICIBANK-EQ,False
-GOLDBEES,Gold ETF,Defensive,Gold,ETF,NSE:GOLDBEES-EQ,True
-LIQUIDBEES,Nippon Liquid ETF,Defensive,LiquidBees,ETF,NSE:LIQUIDBEES-EQ,True
-GSEC,G-Sec ETF,Defensive,G-Sec,ETF,NSE:GSEC-EQ,True
