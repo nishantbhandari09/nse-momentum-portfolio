@@ -1,228 +1,263 @@
-from __future__ import annotations
-
+import os
 import hashlib
-import time
-from datetime import date, datetime, timedelta
-from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timedelta
+from urllib.parse import quote
 
 import pandas as pd
-import streamlit as st
 
 try:
     from fyers_apiv3 import fyersModel
-    from fyers_apiv3 import accessToken
-except ImportError:
+except Exception:
     fyersModel = None
-    accessToken = None
 
 
-def get_secret(name: str, default: str = "") -> str:
-    """
-    Read a value from Streamlit Secrets.
+# ============================================================
+# CONFIG
+# ============================================================
 
-    Supports:
-        st.secrets["KEY"]
-
-    Returns an empty string when unavailable.
-    """
-    try:
-        value = st.secrets.get(name, default)
-        if value is None:
-            return default
-        return str(value).strip()
-    except Exception:
-        return default
+FYERS_LOGIN_URL = "https://api-t1.fyers.in/api/v3/generate-authcode"
 
 
-def get_fyers_app_id() -> str:
-    return get_secret("FYERS_APP_ID")
+# ============================================================
+# CREDENTIALS
+# ============================================================
+
+def get_app_id():
+    return os.getenv("FYERS_APP_ID", "").strip()
 
 
-def get_fyers_secret() -> str:
-    return get_secret("FYERS_SECRET_ID")
+def get_secret_id():
+    return os.getenv("FYERS_SECRET_ID", "").strip()
 
 
-def get_fyers_redirect_uri() -> str:
-    return get_secret("FYERS_REDIRECT_URI")
+def get_redirect_uri():
+    return os.getenv("FYERS_REDIRECT_URI", "").strip()
 
 
-def credentials_available() -> bool:
+def get_access_token():
+    return os.getenv("FYERS_ACCESS_TOKEN", "").strip()
+
+
+def credentials_available():
     return bool(
-        get_fyers_app_id()
-        and get_fyers_secret()
-        and get_fyers_redirect_uri()
-        and fyersModel is not None
-        and accessToken is not None
+        get_app_id()
+        and get_secret_id()
+        and get_redirect_uri()
     )
 
 
-def build_login_url() -> str:
-    """
-    Generate the FYERS OAuth login URL.
-    """
-    if not credentials_available():
+# ============================================================
+# FYERS LOGIN
+# ============================================================
+
+def build_login_url():
+    app_id = get_app_id()
+    redirect_uri = get_redirect_uri()
+
+    if not app_id or not redirect_uri:
         return ""
 
-    session = accessToken.SessionModel(
-        client_id=get_fyers_app_id(),
-        secret_key=get_fyers_secret(),
-        redirect_uri=get_fyers_redirect_uri(),
-        response_type="code",
-        grant_type="authorization_code",
-        state="nse-momentum-portfolio",
+    return (
+        f"{FYERS_LOGIN_URL}"
+        f"?client_id={quote(app_id)}"
+        f"&redirect_uri={quote(redirect_uri)}"
+        f"&response_type=code"
+        f"&state=sample_state"
     )
 
-    return session.generate_authcode()
+
+def create_app_hash():
+    app_id = get_app_id()
+    secret = get_secret_id()
+
+    if not app_id or not secret:
+        raise ValueError("FYERS_APP_ID or FYERS_SECRET_ID is missing.")
+
+    raw = app_id + secret
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
-def exchange_auth_code(auth_code: str) -> Tuple[Optional[str], str]:
+def exchange_auth_code(auth_code):
     """
-    Convert the FYERS auth code into an access token.
+    Exchange FYERS auth_code for an access token.
     """
-    if not credentials_available():
-        return None, "FYERS credentials are missing."
-
-    auth_code = str(auth_code).strip()
-
-    if not auth_code:
-        return None, "Auth code is empty."
-
-    try:
-        session = accessToken.SessionModel(
-            client_id=get_fyers_app_id(),
-            secret_key=get_fyers_secret(),
-            redirect_uri=get_fyers_redirect_uri(),
-            response_type="code",
-            grant_type="authorization_code",
-            state="nse-momentum-portfolio",
-        )
-
-        session.set_token(auth_code)
-
-        response = session.generate_token()
-
-        if isinstance(response, dict):
-            token = response.get("access_token")
-
-            if token:
-                return token, ""
-
-            return None, str(response)
-
-        return None, str(response)
-
-    except Exception as exc:
-        return None, f"FYERS authentication error: {exc}"
-
-
-def create_client(access_token: str):
-    """
-    Create the FYERS market-data client.
-    """
-    if not access_token:
-        return None
 
     if fyersModel is None:
-        return None
+        raise ImportError(
+            "fyers-apiv3 is not installed. Check requirements.txt."
+        )
+
+    app_id = get_app_id()
+    redirect_uri = get_redirect_uri()
+
+    if not app_id:
+        raise ValueError("FYERS_APP_ID is missing.")
+
+    if not redirect_uri:
+        raise ValueError("FYERS_REDIRECT_URI is missing.")
+
+    if not auth_code:
+        raise ValueError("No FYERS auth_code was supplied.")
+
+    session = fyersModel.SessionModel(
+        client_id=app_id,
+        secret_key=get_secret_id(),
+        redirect_uri=redirect_uri,
+        response_type="code",
+        grant_type="authorization_code",
+    )
+
+    session.set_token(auth_code)
+
+    response = session.generate_token()
+
+    if not isinstance(response, dict):
+        raise RuntimeError(f"Unexpected FYERS authentication response: {response}")
+
+    if response.get("s") != "ok":
+        raise RuntimeError(
+            f"FYERS authentication failed: {response}"
+        )
+
+    return response.get("access_token")
+
+
+# ============================================================
+# FYERS CLIENT
+# ============================================================
+
+def create_client(access_token=None):
+    if fyersModel is None:
+        raise ImportError(
+            "fyers-apiv3 is not installed. Check requirements.txt."
+        )
+
+    app_id = get_app_id()
+
+    token = access_token or get_access_token()
+
+    if not app_id:
+        raise ValueError("FYERS_APP_ID is missing.")
+
+    if not token:
+        raise ValueError(
+            "FYERS access token is missing. Login through FYERS first."
+        )
 
     return fyersModel.FyersModel(
-        client_id=get_fyers_app_id(),
-        token=access_token,
-        log_path="",
+        client_id=app_id,
+        token=token,
+        is_async=False,
+        log_path=""
     )
 
 
-def normalize_fyers_symbol(symbol: str) -> str:
-    """
-    Convert:
-        RELIANCE
-        RELIANCE.NS
-        NSE:RELIANCE-EQ
+# ============================================================
+# SYMBOL HANDLING
+# ============================================================
 
-    into:
-        NSE:RELIANCE-EQ
-    """
-    value = str(symbol).strip().upper()
-
-    if not value:
+def clean_symbol(symbol):
+    if symbol is None:
         return ""
 
-    value = value.replace(".NS", "")
+    s = str(symbol).strip().upper()
 
-    if value.startswith("NSE:"):
-        if value.endswith("-EQ"):
-            return value
-        return f"{value}-EQ"
+    if not s:
+        return ""
 
-    if value.endswith("-EQ"):
-        return f"NSE:{value}"
+    # Already a FYERS symbol
+    if ":" in s:
+        return s
 
-    return f"NSE:{value}-EQ"
+    # Indexes
+    index_map = {
+        "NIFTY": "NSE:NIFTY50-INDEX",
+        "NIFTY 50": "NSE:NIFTY50-INDEX",
+        "NIFTY50": "NSE:NIFTY50-INDEX",
+        "NIFTY 100": "NSE:NIFTY100-INDEX",
+        "NIFTY100": "NSE:NIFTY100-INDEX",
+        "NIFTY 200": "NSE:NIFTY200-INDEX",
+        "NIFTY200": "NSE:NIFTY200-INDEX",
+        "NIFTY 500": "NSE:NIFTY500-INDEX",
+        "NIFTY500": "NSE:NIFTY500-INDEX",
+        "BANK NIFTY": "NSE:NIFTYBANK-INDEX",
+        "NIFTY BANK": "NSE:NIFTYBANK-INDEX",
+        "BANKNIFTY": "NSE:NIFTYBANK-INDEX",
+    }
+
+    if s in index_map:
+        return index_map[s]
+
+    # Common ETF / equity symbols
+    if s.endswith("-EQ"):
+        return f"NSE:{s}"
+
+    return f"NSE:{s}-EQ"
 
 
-def clean_symbol(symbol: str) -> str:
-    """
-    Convert FYERS symbol back into the application's simple symbol.
-    """
-    value = str(symbol).strip().upper()
+# ============================================================
+# DATE HELPERS
+# ============================================================
 
-    value = value.replace("NSE:", "")
-    value = value.replace("-EQ", "")
-    value = value.replace(".NS", "")
+def _date_chunks(start_date, end_date, max_days=366):
 
-    return value
-
-
-def _date_chunks(
-    start_date: str,
-    end_date: str,
-    max_days: int = 366,
-) -> Iterable[Tuple[str, str]]:
-
-    start = pd.Timestamp(start_date).date()
-    end = pd.Timestamp(end_date).date()
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
 
     current = start
 
     while current <= end:
+
         chunk_end = min(
-            current + timedelta(days=max_days - 1),
-            end,
+            current + pd.Timedelta(days=max_days - 1),
+            end
         )
 
-        yield (
-            current.strftime("%Y-%m-%d"),
-            chunk_end.strftime("%Y-%m-%d"),
-        )
+        yield current, chunk_end
 
-        current = chunk_end + timedelta(days=1)
+        current = chunk_end + pd.Timedelta(days=1)
 
 
-def _request_history(
-    client,
-    fyers_symbol: str,
-    start_date: str,
-    end_date: str,
-) -> pd.DataFrame:
+# ============================================================
+# HISTORY
+# ============================================================
 
-    all_rows: List[list] = []
+def fetch_symbol_history(
+    symbol,
+    start_date,
+    end_date,
+    resolution="1D",
+    access_token=None,
+):
+    """
+    Fetch historical OHLCV data from FYERS.
+
+    FYERS daily/weekly/monthly history is requested in chunks
+    so long backtests can be downloaded safely.
+    """
+
+    client = create_client(access_token)
+
+    fyers_symbol = clean_symbol(symbol)
+
+    all_rows = []
 
     for chunk_start, chunk_end in _date_chunks(
         start_date,
         end_date,
-        max_days=366,
+        max_days=366
     ):
 
-        data = {
+        payload = {
             "symbol": fyers_symbol,
-            "resolution": "D",
+            "resolution": resolution,
             "date_format": "1",
-            "range_from": chunk_start,
-            "range_to": chunk_end,
+            "range_from": chunk_start.strftime("%Y-%m-%d"),
+            "range_to": chunk_end.strftime("%Y-%m-%d"),
             "cont_flag": "1",
         }
 
-        response = client.history(data=data)
+        response = client.history(data=payload)
 
         if not isinstance(response, dict):
             continue
@@ -232,213 +267,132 @@ def _request_history(
 
         candles = response.get("candles", [])
 
-        if candles:
-            all_rows.extend(candles)
+        for row in candles:
 
-        time.sleep(0.05)
+            if len(row) < 6:
+                continue
+
+            all_rows.append({
+                "timestamp": row[0],
+                "open": row[1],
+                "high": row[2],
+                "low": row[3],
+                "close": row[4],
+                "volume": row[5],
+            })
 
     if not all_rows:
-        return pd.DataFrame()
-
-    rows = []
-
-    for candle in all_rows:
-        if len(candle) < 6:
-            continue
-
-        rows.append(
-            {
-                "timestamp": candle[0],
-                "open": candle[1],
-                "high": candle[2],
-                "low": candle[3],
-                "close": candle[4],
-                "volume": candle[5],
-            }
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ]
         )
 
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
 
     df["date"] = pd.to_datetime(
         df["timestamp"],
         unit="s",
-        errors="coerce",
+        errors="coerce"
+    ).dt.tz_localize("UTC").dt.tz_convert(
+        "Asia/Kolkata"
+    ).dt.tz_localize(None).dt.normalize()
+
+    df = df.drop(columns=["timestamp"])
+
+    numeric_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]
+
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce"
+        )
+
+    df = (
+        df.dropna(subset=["date", "close"])
+          .drop_duplicates(subset=["date"])
+          .sort_values("date")
+          .reset_index(drop=True)
     )
-
-    df = df.dropna(subset=["date"])
-
-    df = df.drop_duplicates(
-        subset=["date"],
-        keep="last",
-    )
-
-    df = df.sort_values("date")
-
-    df = df.set_index("date")
 
     return df
 
 
-@st.cache_data(
-    ttl=60 * 60 * 24,
-    show_spinner=False,
-)
-def fetch_symbol_history(
-    access_token: str,
-    symbol: str,
-    start_date: str,
-    end_date: str,
-) -> pd.DataFrame:
-
-    client = create_client(access_token)
-
-    if client is None:
-        return pd.DataFrame()
-
-    fyers_symbol = normalize_fyers_symbol(symbol)
-
-    if not fyers_symbol:
-        return pd.DataFrame()
-
-    try:
-        return _request_history(
-            client,
-            fyers_symbol,
-            start_date,
-            end_date,
-        )
-    except Exception:
-        return pd.DataFrame()
-
-
-@st.cache_data(
-    ttl=60 * 60 * 24,
-    show_spinner=False,
-)
 def fetch_prices(
-    access_token: str,
-    symbols: Tuple[str, ...],
-    start_date: str,
-    end_date: str,
-    delay: float = 0.05,
-) -> Tuple[pd.DataFrame, List[str]]:
+    symbols,
+    start_date,
+    end_date,
+    resolution="1D",
+    access_token=None,
+):
+    """
+    Fetch multiple symbols.
+    Returns:
+        dict[symbol] = DataFrame
+    """
 
-    prices: Dict[str, pd.Series] = {}
-
-    unavailable: List[str] = []
+    result = {}
 
     for symbol in symbols:
 
-        clean = clean_symbol(symbol)
-
         try:
-            history = fetch_symbol_history(
-                access_token,
-                clean,
-                start_date,
-                end_date,
+
+            df = fetch_symbol_history(
+                symbol=symbol,
+                start_date=start_date,
+                end_date=end_date,
+                resolution=resolution,
+                access_token=access_token,
             )
 
-            if history.empty:
-                unavailable.append(clean)
-                continue
+            if not df.empty:
+                result[symbol] = df
 
-            if "close" not in history.columns:
-                unavailable.append(clean)
-                continue
+        except Exception as e:
 
-            series = history["close"].copy()
+            result[symbol] = pd.DataFrame({
+                "error": [str(e)]
+            })
 
-            series.index = pd.to_datetime(
-                series.index
-            ).tz_localize(None)
+    return result
 
-            series = series.astype(float)
 
-            prices[clean] = series
+# ============================================================
+# QUOTE
+# ============================================================
 
-        except Exception:
-            unavailable.append(clean)
+def get_quote(symbol, access_token=None):
 
-        time.sleep(max(float(delay), 0.0))
+    client = create_client(access_token)
 
-    if not prices:
-        return pd.DataFrame(), unavailable
+    fyers_symbol = clean_symbol(symbol)
 
-    frame = pd.DataFrame(prices)
-
-    frame = frame.sort_index()
-
-    frame = frame.loc[
-        :,
-        ~frame.columns.duplicated(),
-    ]
-
-    frame = frame.replace(
-        [float("inf"), float("-inf")],
-        pd.NA,
+    response = client.quotes(
+        data={
+            "symbols": fyers_symbol
+        }
     )
 
-    return frame, unavailable
+    return response
 
 
-def get_profile(access_token: str):
-    """
-    Simple authentication test.
-    """
+# ============================================================
+# PROFILE
+# ============================================================
+
+def get_profile(access_token=None):
+
     client = create_client(access_token)
 
-    if client is None:
-        return None
-
-    try:
-        return client.get_profile()
-    except Exception as exc:
-        return {
-            "s": "error",
-            "message": str(exc),
-        }
-
-
-def get_quote(
-    access_token: str,
-    symbols: List[str],
-):
-    """
-    Retrieve current quote snapshots.
-
-    FYERS supports up to 50 symbols per quotes request.
-    """
-    client = create_client(access_token)
-
-    if client is None:
-        return None
-
-    fyers_symbols = [
-        normalize_fyers_symbol(symbol)
-        for symbol in symbols
-    ]
-
-    fyers_symbols = [
-        symbol for symbol in fyers_symbols
-        if symbol
-    ]
-
-    if not fyers_symbols:
-        return None
-
-    try:
-        data = {
-            "symbols": ",".join(fyers_symbols)
-        }
-
-        return client.quotes(data)
-
-    except Exception as exc:
-        return {
-            "s": "error",
-            "message": str(exc),
-        }
+    return client.get_profile()
