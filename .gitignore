@@ -1,9 +1,0 @@
-.streamlit/secrets.toml
-
-data/
-*.parquet
-
-__pycache__/
-*.pyc
-
-.env
