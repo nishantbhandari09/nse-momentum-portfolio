@@ -62,7 +62,7 @@ def exchange_auth_code(auth_code: str) -> Dict[str, Any]:
     secret = get_secret_id()
     if not app_id or not secret:
         raise ValueError("FYERS_APP_ID and FYERS_SECRET_ID are required in Streamlit Secrets.")
-    app_hash = hashlib.sha256(f"{app_id}{secret}".encode()).hexdigest()
+    app_hash = hashlib.sha256(f"{app_id}:{secret}".encode("utf-8")).hexdigest()
     payload = {
         "grant_type": "authorization_code",
         "appIdHash": app_hash,
