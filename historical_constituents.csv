@@ -1,0 +1,4 @@
+symbol,group,valid_from,valid_to
+# Populate this file with actual point-in-time constituent membership for index/sector groups.
+# Example:
+# NSE:RELIANCE-EQ,NIFTY500,2024-01-01,
