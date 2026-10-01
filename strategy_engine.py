@@ -276,7 +276,7 @@ def scan_strategy(
     auto_fetch: bool = True,
 ) -> Tuple[pd.DataFrame, Dict]:
     group = strategy["group"]
-    lookbacks = strategy.get("lookbacks", {252: 0.4, 120: 0.3, 90: 0.2, 60: 0.1})
+    lookbacks = normalize_lookbacks(strategy.get("lookbacks"))
     conditions = strategy.get("conditions", {}) or {}
     ema_period = int(conditions.get("ema_period", 50))
     history_days = max(max(lookbacks.keys()) * 2 + 60, 600, ema_period * 3)
