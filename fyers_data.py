@@ -31,6 +31,23 @@ def _secret(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
+
+def normalize_history_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a history frame with a guaranteed pandas datetime64-normalized date column."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    out = df.copy()
+    if "date" not in out.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    parsed = pd.to_datetime(out["date"], errors="coerce", utc=True)
+    out["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    out = out.dropna(subset=["date"]).drop_duplicates("date").sort_values("date")
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    return out
+
+
 def get_app_id() -> str:
     return _secret("FYERS_APP_ID")
 
@@ -81,11 +98,10 @@ def parse_fyers_candles(response: Dict[str, Any]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     df = pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    df["date"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce", utc=True)
     df = df[["date", "open", "high", "low", "close", "volume"]]
-    for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(subset=["date", "close"]).drop_duplicates("date").sort_values("date")
+    df = normalize_history_dates(df)
+    return df.dropna(subset=["close"])
 
 
 class FyersClient:
@@ -230,10 +246,8 @@ def _yahoo_history(symbol: str, start: date, end: date) -> pd.DataFrame:
         needed = ["date","open","high","low","close","volume"]
         if not set(needed).issubset(raw.columns):
             return pd.DataFrame(columns=needed)
-        raw["date"] = pd.to_datetime(raw["date"]).dt.normalize()
-        for col in needed[1:]:
-            raw[col] = pd.to_numeric(raw[col], errors="coerce")
-        return raw[needed].dropna(subset=["date","close"]).drop_duplicates("date").sort_values("date")
+        raw = normalize_history_dates(raw[needed])
+        return raw.dropna(subset=["close"])
     except Exception:
         return pd.DataFrame(columns=["date","open","high","low","close","volume"])
 
@@ -246,10 +260,13 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
     path.parent.mkdir(parents=True, exist_ok=True)
 
     def read_cache() -> pd.DataFrame:
-        if path.exists():
-            return pd.read_parquet(path)
-        if csv_path.exists():
-            return pd.read_csv(csv_path, parse_dates=["date"])
+        try:
+            if path.exists():
+                return normalize_history_dates(pd.read_parquet(path))
+            if csv_path.exists():
+                return normalize_history_dates(pd.read_csv(csv_path))
+        except Exception:
+            return pd.DataFrame()
         return pd.DataFrame()
 
     def write_cache(frame: pd.DataFrame) -> None:
@@ -260,7 +277,7 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
 
     cached = read_cache() if not force else pd.DataFrame()
     if not cached.empty:
-        cached["date"] = pd.to_datetime(cached["date"]).dt.normalize()
+        cached = normalize_history_dates(cached)
         if cached["date"].min().date() <= start and cached["date"].max().date() >= end:
             return cached[(cached["date"].dt.date >= start) & (cached["date"].dt.date <= end)].copy()
         missing_parts: List[pd.DataFrame] = [cached]
