@@ -33,10 +33,17 @@ def _load_local_history(symbol: str, cache_dir: Path = PRICE_DIR) -> pd.DataFram
     if path.exists():
         df = pd.read_parquet(path)
     elif csv_path.exists():
-        df = pd.read_csv(csv_path, parse_dates=["date"])
+        df = pd.read_csv(csv_path)
     else:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+    if "date" not in df.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    parsed = pd.to_datetime(df["date"], errors="coerce", utc=True)
+    df["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    df = df.dropna(subset=["date"])
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_values("date").drop_duplicates("date")
 
 
