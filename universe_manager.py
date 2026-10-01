@@ -148,7 +148,7 @@ def _has_nifty_constituents(catalog: pd.DataFrame, group: str) -> bool:
 def ensure_nifty_constituents(group: str, catalog: pd.DataFrame | None = None) -> pd.DataFrame:
     group = str(group).upper()
     catalog = catalog if catalog is not None else load_catalog()
-    if group in {"NIFTY50", "NIFTY100", "NIFTY200", "NIFTY500"} and not _has_nifty_constituents(catalog, group):
+    if group in {"NIFTY50", "NIFTY100", "NIFTY200", "NIFTY500", "BANKNIFTY"} and not _has_nifty_constituents(catalog, group):
         refreshed = sync_nifty_constituents(catalog)
         if not refreshed.empty:
             catalog = refreshed
@@ -184,6 +184,7 @@ NIFTY_CONSTITUENT_URLS = {
     "NIFTY100": "https://niftyindices.com/IndexConstituent/ind_nifty100list.csv",
     "NIFTY200": "https://niftyindices.com/IndexConstituent/ind_nifty200list.csv",
     "NIFTY500": "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+    "BANKNIFTY": "https://niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
 }
 
 
