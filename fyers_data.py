@@ -40,10 +40,16 @@ def normalize_history_dates(df: pd.DataFrame) -> pd.DataFrame:
     if "date" not in out.columns:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     parsed = pd.to_datetime(out["date"], errors="coerce")
-    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-        out["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
-    else:
-        out["date"] = parsed.dt.normalize()
+    normalized = []
+    for value in parsed:
+        if pd.isna(value):
+            normalized.append(pd.NaT)
+            continue
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        normalized.append(ts.normalize())
+    out["date"] = pd.Series(normalized, index=out.index)
     out = out.dropna(subset=["date"]).drop_duplicates("date").sort_values("date")
     for col in ["open", "high", "low", "close", "volume"]:
         if col in out.columns:
@@ -282,7 +288,8 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
     if not cached.empty:
         cached = normalize_history_dates(cached)
         if cached["date"].min().date() <= start and cached["date"].max().date() >= end:
-            return cached[(cached["date"].dt.date >= start) & (cached["date"].dt.date <= end)].copy()
+            mask = cached["date"].apply(lambda x: x.date() if pd.notna(x) else None)
+            return cached[(mask >= start) & (mask <= end)].copy()
         missing_parts: List[pd.DataFrame] = [cached]
 
         if start < cached["date"].min().date():
@@ -306,7 +313,8 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
         merged = pd.concat(missing_parts, ignore_index=True).drop_duplicates("date").sort_values("date")
         if len(merged) > len(cached):
             write_cache(merged)
-        return merged[(merged["date"].dt.date >= start) & (merged["date"].dt.date <= end)].copy()
+        mask = merged["date"].apply(lambda x: x.date() if pd.notna(x) else None)
+        return merged[(mask >= start) & (mask <= end)].copy()
 
     try:
         df = client.history_chunked(symbol, start, end)
@@ -324,4 +332,5 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
 
     if not df.empty:
         write_cache(df)
-    return df[(df["date"].dt.date >= start) & (df["date"].dt.date <= end)].copy()
+    mask = df["date"].apply(lambda x: x.date() if pd.notna(x) else None)
+    return df[(mask >= start) & (mask <= end)].copy()
