@@ -38,8 +38,11 @@ def _load_local_history(symbol: str, cache_dir: Path = PRICE_DIR) -> pd.DataFram
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     if "date" not in df.columns:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    parsed = pd.to_datetime(df["date"], errors="coerce", utc=True)
-    df["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    parsed = pd.to_datetime(df["date"], errors="coerce")
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        df["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    else:
+        df["date"] = parsed.dt.normalize()
     df = df.dropna(subset=["date"])
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
