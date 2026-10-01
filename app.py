@@ -535,7 +535,7 @@ elif page == "Data Manager":
     if c2.button("🔄 Rebuild Universe Catalog", use_container_width=True):
         catalog=refresh_catalog()
         st.success(f"Catalog rebuilt: {len(catalog)} symbols.")
-    if c3.button("🇮🇳 Sync NIFTY 50/100/200/500", use_container_width=True):
+    if c3.button("🇮🇳 Sync NIFTY 50/100/200/500 + BANK", use_container_width=True):
         catalog=sync_nifty_constituents(load_catalog())
         st.success(f"NIFTY constituent groups synced. Catalog rows: {len(catalog)}")
     if c4.button("📦 Export Universe Catalog", use_container_width=True):
