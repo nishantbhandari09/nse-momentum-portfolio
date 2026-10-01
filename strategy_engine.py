@@ -55,13 +55,33 @@ def save_history(df: pd.DataFrame, symbol: str, index: bool = False) -> Path:
 
 def load_history_for_symbol(symbol: str, start: date, end: date, client: Optional[FyersClient] = None,
                              allow_fetch: bool = False) -> pd.DataFrame:
+    is_index = "-INDEX" in symbol.upper()
+    cache_dir = INDEX_DIR if is_index else PRICE_DIR
+
+    # Always allow FYERS to extend/repair the requested date range. This fixes the
+    # case where a local file exists but does not contain the full backtest period.
+    if allow_fetch and client:
+        fetched = get_history_cached(client, symbol, start, end, str(cache_dir))
+        if not fetched.empty:
+            save_history(fetched, symbol, index=is_index)
+            return fetched
+
     df = _load_local_history(symbol)
-    if df.empty and allow_fetch and client:
-        df = get_history_cached(client, symbol, start, end, str(PRICE_DIR))
-        save_history(df, symbol, index=("-INDEX" in symbol))
     if df.empty:
         return df
     return df[(df["date"].dt.date >= start) & (df["date"].dt.date <= end)].copy()
+
+
+def normalize_lookbacks(raw: Dict | None) -> Dict[int, float]:
+    """Normalize saved JSON keys (often strings) back to integer lookback periods."""
+    raw = raw or {}
+    out: Dict[int, float] = {}
+    for key, value in raw.items():
+        try:
+            out[int(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out or {252: 0.4, 120: 0.3, 90: 0.2, 60: 0.1}
 
 
 def _return(df: pd.DataFrame, n: int, asof: pd.Timestamp) -> float:
@@ -324,7 +344,7 @@ def backtest_strategy(strategy: Dict, start_date: date, end_date: date, initial_
     trades: List[dict] = []
     rebalance_rows: List[dict] = []
     equity_rows: List[dict] = []
-    lookbacks = strategy.get("lookbacks", {252: .4, 120: .3, 90: .2, 60: .1})
+    lookbacks = normalize_lookbacks(strategy.get("lookbacks"))
     top_n = int(strategy.get("top_n", 20))
     exit_rank = int(strategy.get("exit_rank", 40))
     market_index = strategy.get("market_index", "NSE:NIFTY50-INDEX")
@@ -344,7 +364,7 @@ def backtest_strategy(strategy: Dict, start_date: date, end_date: date, initial_
     all_needed_symbols.add(market_index)
 
     histories: Dict[str, pd.DataFrame] = {}
-    extended_start = start_date - timedelta(days=max(lookbacks.keys()) * 2 + gate_period + 50)
+    extended_start = start_date - timedelta(days=int(max(lookbacks.keys())) * 2 + gate_period + 50)
     for symbol in list(all_needed_symbols):
         hist = load_history_for_symbol(symbol, extended_start, end_date, client=client, allow_fetch=auto_fetch)
         if not hist.empty:
@@ -374,8 +394,14 @@ def backtest_strategy(strategy: Dict, start_date: date, end_date: date, initial_
             continue
         allowed, gate_status, gate_value = market_gate(market_hist, signal_date, gate_indicator, gate_period, atr_period, vstop_mult)
         symbols = point_in_time_universe(strategy.get("group", "ALL"), signal_date.date(), catalog)
-        rank_df = rank_symbols(symbols, signal_date, lookbacks, extended_start, signal_date.date())
-        rank_df = apply_scan_conditions(rank_df, strategy, signal_date.date())
+        rank_df = rank_symbols(
+            symbols, signal_date, lookbacks, extended_start, signal_date.date(),
+            client=client, allow_fetch=auto_fetch
+        )
+        rank_df = apply_scan_conditions(
+            rank_df, strategy, signal_date.date(),
+            client=client, start=extended_start, allow_fetch=auto_fetch
+        )
         rank_map = dict(zip(rank_df["symbol"], rank_df["rank"])) if not rank_df.empty else {}
         price_map_close = {}
         for sym, h in list(histories.items()):
