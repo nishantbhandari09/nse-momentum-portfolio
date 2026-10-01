@@ -157,8 +157,10 @@ def point_in_time_universe(group: str, asof: date, catalog: Optional[pd.DataFram
         needed = {"symbol", "group", "valid_from", "valid_to"}
         if not needed.issubset(hc.columns):
             return base["symbol"].tolist()
-        hc["valid_from"] = pd.to_datetime(hc["valid_from"], errors="coerce").dt.date
-        hc["valid_to"] = pd.to_datetime(hc["valid_to"], errors="coerce").dt.date
+        valid_from = pd.to_datetime(hc["valid_from"], errors="coerce")
+        valid_to = pd.to_datetime(hc["valid_to"], errors="coerce")
+        hc["valid_from"] = valid_from.apply(lambda x: x.date() if pd.notna(x) else None)
+        hc["valid_to"] = valid_to.apply(lambda x: x.date() if pd.notna(x) else None)
         active = hc[(hc["group"].astype(str).str.upper() == group.upper()) &
                     (hc["valid_from"] <= asof) &
                     ((hc["valid_to"].isna()) | (hc["valid_to"] >= asof))]
