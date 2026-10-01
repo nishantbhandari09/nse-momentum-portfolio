@@ -358,7 +358,13 @@ def backtest_strategy(strategy: Dict, start_date: date, end_date: date, initial_
     all_needed_symbols = set()
     catalog = load_catalog()
     # Build broad list of possible symbols for the group over the whole backtest period.
-    current = catalog if group_is_broad(strategy.get("group", "ALL")) else symbols_for_group(strategy.get("group", "ALL"), catalog)
+    if group_is_broad(strategy.get("group", "ALL")):
+        current = catalog
+    else:
+        current = symbols_for_group(strategy.get("group", "ALL"), catalog)
+        # symbols_for_group may auto-sync NIFTY constituent lists; reload the catalog
+        # so monthly point-in-time universe checks use the refreshed constituent set.
+        catalog = load_catalog()
     if not current.empty:
         all_needed_symbols.update(current["symbol"].tolist())
     all_needed_symbols.add(market_index)
@@ -393,7 +399,7 @@ def backtest_strategy(strategy: Dict, start_date: date, end_date: date, initial_
         if exec_date is None or exec_date > pd.Timestamp(end_date):
             continue
         allowed, gate_status, gate_value = market_gate(market_hist, signal_date, gate_indicator, gate_period, atr_period, vstop_mult)
-        symbols = point_in_time_universe(strategy.get("group", "ALL"), signal_date.date(), catalog)
+        symbols = point_in_time_universe(strategy.get("group", "ALL"), signal_date.date())
         rank_df = rank_symbols(
             symbols, signal_date, lookbacks, extended_start, signal_date.date(),
             client=client, allow_fetch=auto_fetch
