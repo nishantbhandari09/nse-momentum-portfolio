@@ -39,8 +39,11 @@ def normalize_history_dates(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "date" not in out.columns:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    parsed = pd.to_datetime(out["date"], errors="coerce", utc=True)
-    out["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    parsed = pd.to_datetime(out["date"], errors="coerce")
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        out["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
+    else:
+        out["date"] = parsed.dt.normalize()
     out = out.dropna(subset=["date"]).drop_duplicates("date").sort_values("date")
     for col in ["open", "high", "low", "close", "volume"]:
         if col in out.columns:
