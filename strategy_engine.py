@@ -140,10 +140,13 @@ def point_in_time_universe(group: str, asof: date, catalog: Optional[pd.DataFram
 
 
 def rank_symbols(symbols: Iterable[str], asof: pd.Timestamp, lookbacks: Dict[int, float],
-                  start: date, end: date) -> pd.DataFrame:
+                  start: date, end: date, client: Optional[FyersClient] = None,
+                  allow_fetch: bool = False) -> pd.DataFrame:
     rows = []
     for symbol in symbols:
-        hist = load_history_for_symbol(symbol, start, end)
+        hist = load_history_for_symbol(
+            symbol, start, end, client=client, allow_fetch=allow_fetch
+        )
         if hist.empty:
             continue
         returns = {n: _return(hist, int(n), asof) for n in lookbacks}
@@ -171,14 +174,25 @@ def rank_symbols(symbols: Iterable[str], asof: pd.Timestamp, lookbacks: Dict[int
 
 
 
-def apply_scan_conditions(ranked: pd.DataFrame, strategy: Dict, asof: date) -> pd.DataFrame:
+def apply_scan_conditions(
+    ranked: pd.DataFrame,
+    strategy: Dict,
+    asof: date,
+    client: Optional[FyersClient] = None,
+    start: Optional[date] = None,
+    allow_fetch: bool = False,
+) -> pd.DataFrame:
     if ranked.empty:
         return ranked
     conditions = strategy.get("conditions", {}) or {}
     out = ranked.copy()
     keep = pd.Series(True, index=out.index)
     for i, row in out.iterrows():
-        hist = _load_local_history(row["symbol"])
+        symbol_start = start or (asof - timedelta(days=550))
+        hist = load_history_for_symbol(
+            row["symbol"], symbol_start, asof,
+            client=client, allow_fetch=allow_fetch
+        )
         if hist.empty:
             keep.loc[i] = False
             continue
@@ -197,32 +211,75 @@ def apply_scan_conditions(ranked: pd.DataFrame, strategy: Dict, asof: date) -> p
             if len(h) < period or close < float(sma(h["close"], period).iloc[-1]):
                 keep.loc[i] = False
                 continue
+        days = min(252, len(h))
+        hi = float(h["high"].tail(days).max())
+        lo = float(h["low"].tail(days).min())
+        range_52 = hi - lo
+        distance_from_high = ((hi - close) / hi * 100.0) if hi > 0 else np.nan
+        position_from_low = ((close - lo) / range_52 * 100.0) if range_52 > 0 else np.nan
+        out.loc[i, "52W High"] = hi
+        out.loc[i, "52W Low"] = lo
+        out.loc[i, "Distance From 52W High %"] = distance_from_high
+        out.loc[i, "Position From 52W Low %"] = position_from_low
+
         if conditions.get("near_52w"):
-            days = min(252, len(h))
-            hi = float(h["high"].tail(days).max())
-            max_below = float(conditions.get("near_52w_pct", 20.0)) / 100.0
-            if hi <= 0 or close < hi * (1 - max_below):
+            threshold = float(conditions.get("near_52w_pct", 40.0))
+            reference = str(conditions.get("retracement_reference", "52W High"))
+            if reference == "52W Low":
+                passes_retracement = pd.notna(position_from_low) and position_from_low >= threshold
+            else:
+                passes_retracement = pd.notna(distance_from_high) and distance_from_high <= threshold
+            if not passes_retracement:
                 keep.loc[i] = False
                 continue
+
         if conditions.get("breakout_52w"):
-            days = min(252, len(h))
-            prior = h["high"].tail(days + 1).iloc[:-1].max() if len(h) > days else np.nan
+            prior = h["high"].tail(253).iloc[:-1].max() if len(h) > 252 else np.nan
             if pd.isna(prior) or close <= float(prior):
                 keep.loc[i] = False
                 continue
     out = out.loc[keep].copy().reset_index(drop=True)
     out["rank"] = np.arange(1, len(out) + 1)
+    top_n = int(strategy.get("top_n", 20))
+    exit_rank = int(strategy.get("exit_rank", 40))
+    out["Signal"] = np.where(
+        out["rank"] <= top_n,
+        "ENTRY / TOP HOLDING",
+        np.where(out["rank"] <= exit_rank, "HOLD / BUFFER", "EXIT ZONE"),
+    )
     return out
 
-def scan_strategy(strategy: Dict, asof: date) -> Tuple[pd.DataFrame, Dict]:
+def scan_strategy(
+    strategy: Dict,
+    asof: date,
+    client: Optional[FyersClient] = None,
+    auto_fetch: bool = True,
+) -> Tuple[pd.DataFrame, Dict]:
     group = strategy["group"]
     lookbacks = strategy.get("lookbacks", {252: 0.4, 120: 0.3, 90: 0.2, 60: 0.1})
-    start = asof - timedelta(days=max(lookbacks.keys()) * 2 + 30)
+    conditions = strategy.get("conditions", {}) or {}
+    ema_period = int(conditions.get("ema_period", 50))
+    history_days = max(max(lookbacks.keys()) * 2 + 60, 600, ema_period * 3)
+    start = asof - timedelta(days=history_days)
     end = asof
     symbols = point_in_time_universe(group, asof)
-    ranked = rank_symbols(symbols, pd.Timestamp(asof), lookbacks, start, end)
-    ranked = apply_scan_conditions(ranked, strategy, asof)
-    status = {"universe_size": len(symbols), "ranked_size": len(ranked), "asof": str(asof), "group": group}
+    ranked = rank_symbols(
+        symbols, pd.Timestamp(asof), lookbacks, start, end,
+        client=client, allow_fetch=bool(auto_fetch)
+    )
+    ranked = apply_scan_conditions(
+        ranked, strategy, asof,
+        client=client, start=start, allow_fetch=bool(auto_fetch)
+    )
+    status = {
+        "universe_size": len(symbols),
+        "ranked_size": len(ranked),
+        "asof": str(asof),
+        "group": group,
+        "history_start": str(start),
+        "history_end": str(end),
+        "auto_fetch": bool(auto_fetch),
+    }
     return ranked, status
 
 
