@@ -39,10 +39,16 @@ def _load_local_history(symbol: str, cache_dir: Path = PRICE_DIR) -> pd.DataFram
     if "date" not in df.columns:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
     parsed = pd.to_datetime(df["date"], errors="coerce")
-    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
-        df["date"] = parsed.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None).dt.normalize()
-    else:
-        df["date"] = parsed.dt.normalize()
+    normalized = []
+    for value in parsed:
+        if pd.isna(value):
+            normalized.append(pd.NaT)
+            continue
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
+        normalized.append(ts.normalize())
+    df["date"] = pd.Series(normalized, index=df.index)
     df = df.dropna(subset=["date"])
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
@@ -79,7 +85,8 @@ def load_history_for_symbol(symbol: str, start: date, end: date, client: Optiona
     df = _load_local_history(symbol)
     if df.empty:
         return df
-    return df[(df["date"].dt.date >= start) & (df["date"].dt.date <= end)].copy()
+    mask = df["date"].apply(lambda x: x.date() if pd.notna(x) else None)
+    return df[(mask >= start) & (mask <= end)].copy()
 
 
 def normalize_lookbacks(raw: Dict | None) -> Dict[int, float]:
