@@ -106,7 +106,7 @@ with st.sidebar:
 
 def default_strategy() -> dict:
     return {
-        "group": "ALL_ETF",
+        "group": "NIFTY500",
         "lookbacks": {252: 0.40, 120: 0.30, 90: 0.20, 60: 0.10},
         "top_n": 20,
         "exit_rank": 40,
@@ -122,7 +122,8 @@ def default_strategy() -> dict:
             "above_sma": False,
             "sma_period": 50,
             "near_52w": False,
-            "near_52w_pct": 20.0,
+            "near_52w_pct": 40.0,
+            "retracement_reference": "52W High",
             "breakout_52w": False,
         },
         "transaction_cost_bps": 10.0,
@@ -136,7 +137,9 @@ def strategy_editor(prefix: str, base: dict | None = None) -> dict:
     catalog = load_catalog()
     groups = available_groups(catalog)
     c1, c2, c3 = st.columns(3)
-    group = c1.selectbox("Universe / Group", groups, index=groups.index(base.get("group", "ALL_ETF")) if base.get("group") in groups else 0, key=f"{prefix}_group")
+    preferred_group = base.get("group", "NIFTY500")
+    group_index = groups.index(preferred_group) if preferred_group in groups else (groups.index("NIFTY500") if "NIFTY500" in groups else 0)
+    group = c1.selectbox("Universe / Group", groups, index=group_index, key=f"{prefix}_group")
     top_n = c2.number_input("Top N Entry Rank", min_value=1, max_value=500, value=int(base.get("top_n", 20)), key=f"{prefix}_top")
     exit_rank = c3.number_input("Exit Rank", min_value=1, max_value=1000, value=int(base.get("exit_rank", 40)), key=f"{prefix}_exit")
     if exit_rank <= top_n:
@@ -166,7 +169,8 @@ def strategy_editor(prefix: str, base: dict | None = None) -> dict:
     sma_period = c4.number_input("SMA period", 2, 500, int(cond0.get("sma_period", 50)), key=f"{prefix}_sma_p")
     c5, c6 = st.columns(2)
     near_52w = c5.checkbox("Within % of 52-week high", bool(cond0.get("near_52w", False)), key=f"{prefix}_52w_on")
-    near_52w_pct = c6.number_input("Maximum % below 52-week high", 0.0, 100.0, float(cond0.get("near_52w_pct", 20.0)), step=1.0, key=f"{prefix}_52w_pct")
+    near_52w_pct = c6.number_input("Maximum % below 52-week high", 0.0, 100.0, float(cond0.get("near_52w_pct", 40.0)), step=1.0, key=f"{prefix}_52w_pct")
+    st.caption("Example: 40% means the close can be at most 40% below the 52-week high.")
     breakout_52w = st.checkbox("52-week breakout (close > prior 252-day high)", bool(cond0.get("breakout_52w", False)), key=f"{prefix}_breakout")
 
     st.markdown("### Market Entry Gate — blocks new entries only")
@@ -209,6 +213,7 @@ def strategy_editor(prefix: str, base: dict | None = None) -> dict:
             "above_ema": bool(above_ema), "ema_period": int(ema_period),
             "above_sma": bool(above_sma), "sma_period": int(sma_period),
             "near_52w": bool(near_52w), "near_52w_pct": float(near_52w_pct),
+            "retracement_reference": "52W High",
             "breakout_52w": bool(breakout_52w),
         },
         "transaction_cost_bps": float(cost_bps),
@@ -313,9 +318,12 @@ if page == "Scanner":
     scan_clicked = c2.button("🔎 SCAN STOCKS", type="primary", use_container_width=True)
     strategy_name = c3.text_input("Strategy name", "Momentum Strategy 20", key="scan_strategy_name")
     if scan_clicked:
-        with st.spinner("Scanning stored FYERS history..."):
+        with st.spinner("Checking FYERS history and scanning the selected universe..."):
             try:
-                ranked, meta = scan_strategy(strategy, scan_date)
+                if client is None:
+                    st.error("Connect FYERS first. The scanner now downloads missing history automatically from FYERS.")
+                    st.stop()
+                ranked, meta = scan_strategy(strategy, scan_date, client=client, auto_fetch=True)
                 st.session_state["last_scan"] = ranked
                 st.session_state["last_scan_meta"] = meta
                 st.session_state["last_scan_strategy"] = strategy
@@ -338,7 +346,7 @@ if page == "Scanner":
             st.session_state["page_jump"] = "Portfolio"
             st.rerun()
     else:
-        st.info("Run a scan. Historical prices must already be downloaded for the selected universe.")
+        st.info("Run a scan. If FYERS is connected, missing history is downloaded automatically; Data Manager is only needed for manual/bulk downloads.")
 
 elif page == "Portfolio":
     st.header("2. Portfolio Execution")
@@ -473,7 +481,7 @@ elif page == "Monthly Backtest":
     start=b1.date_input("Backtest start", date.today()-timedelta(days=5*365), key="bt_start")
     end=b2.date_input("Backtest end", date.today(), key="bt_end")
     capital=b3.number_input("Initial Capital", 10000.0, 1000000000.0, 500000.0, step=10000.0, key="bt_cap")
-    auto_fetch=st.checkbox("Auto-fetch missing FYERS history (can take a long time for large ETF/index universes)", False, key="bt_fetch")
+    auto_fetch=st.checkbox("Auto-fetch missing FYERS history", True, key="bt_fetch")
     if st.button("▶ RUN FULL BACKTEST", type="primary", use_container_width=True):
         if end <= start:
             st.error("Backtest end date must be after start date.")

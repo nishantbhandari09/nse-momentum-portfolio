@@ -135,9 +135,29 @@ def available_groups(catalog: pd.DataFrame | None = None) -> List[str]:
     return sorted(groups)
 
 
+def _has_nifty_constituents(catalog: pd.DataFrame, group: str) -> bool:
+    if catalog.empty or "groups" not in catalog.columns:
+        return False
+    mask = catalog["groups"].fillna("").astype(str).str.contains(
+        rf"(?:^|\|){re.escape(group)}(?:\||$)", regex=True, na=False
+    )
+    # The index itself is not a constituent. Require at least a small set of EQ rows.
+    return int((mask & catalog["symbol"].astype(str).str.endswith("-EQ")).sum()) >= 5
+
+
+def ensure_nifty_constituents(group: str, catalog: pd.DataFrame | None = None) -> pd.DataFrame:
+    group = str(group).upper()
+    catalog = catalog if catalog is not None else load_catalog()
+    if group in {"NIFTY50", "NIFTY100", "NIFTY200", "NIFTY500"} and not _has_nifty_constituents(catalog, group):
+        refreshed = sync_nifty_constituents(catalog)
+        if not refreshed.empty:
+            catalog = refreshed
+    return catalog
+
+
 def symbols_for_group(group: str, catalog: pd.DataFrame | None = None) -> pd.DataFrame:
     group = group.upper()
-    catalog = catalog if catalog is not None else load_catalog()
+    catalog = ensure_nifty_constituents(group, catalog)
     if catalog.empty:
         return catalog
     if group == "ALL":

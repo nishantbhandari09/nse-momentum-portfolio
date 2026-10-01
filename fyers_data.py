@@ -207,6 +207,37 @@ def download_symbol_master(exchange_file: str = "NSE_CM", destination: str = "da
     return path
 
 
+def _yahoo_history(symbol: str, start: date, end: date) -> pd.DataFrame:
+    """Fallback only when FYERS cannot return history for a symbol."""
+    try:
+        import yfinance as yf
+        ticker = symbol.replace("NSE:", "").replace("-EQ", "") + ".NS"
+        raw = yf.download(
+            ticker,
+            start=start.isoformat(),
+            end=(end + timedelta(days=1)).isoformat(),
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
+        if raw is None or raw.empty:
+            return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        raw = raw.reset_index()
+        rename = {"Date":"date","Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"}
+        raw = raw.rename(columns=rename)
+        needed = ["date","open","high","low","close","volume"]
+        if not set(needed).issubset(raw.columns):
+            return pd.DataFrame(columns=needed)
+        raw["date"] = pd.to_datetime(raw["date"]).dt.normalize()
+        for col in needed[1:]:
+            raw[col] = pd.to_numeric(raw[col], errors="coerce")
+        return raw[needed].dropna(subset=["date","close"]).drop_duplicates("date").sort_values("date")
+    except Exception:
+        return pd.DataFrame(columns=["date","open","high","low","close","volume"])
+
+
 def get_history_cached(client: FyersClient, symbol: str, start: date, end: date, cache_dir: str,
                        force: bool = False) -> pd.DataFrame:
     stem = f"{symbol.replace(':', '_').replace('/', '_').replace('?', '_')}"
@@ -233,16 +264,44 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
         if cached["date"].min().date() <= start and cached["date"].max().date() >= end:
             return cached[(cached["date"].dt.date >= start) & (cached["date"].dt.date <= end)].copy()
         missing_parts: List[pd.DataFrame] = [cached]
+
         if start < cached["date"].min().date():
-            missing_parts.append(client.history_chunked(symbol, start, cached["date"].min().date() - timedelta(days=1)))
+            missing_start = start
+            missing_end = cached["date"].min().date() - timedelta(days=1)
+            try:
+                missing_parts.append(client.history_chunked(symbol, missing_start, missing_end))
+            except Exception:
+                if not symbol.upper().endswith("-INDEX"):
+                    missing_parts.append(_yahoo_history(symbol, missing_start, missing_end))
+
         if end > cached["date"].max().date():
-            missing_parts.append(client.history_chunked(symbol, cached["date"].max().date() + timedelta(days=1), end))
+            missing_start = cached["date"].max().date() + timedelta(days=1)
+            missing_end = end
+            try:
+                missing_parts.append(client.history_chunked(symbol, missing_start, missing_end))
+            except Exception:
+                if not symbol.upper().endswith("-INDEX"):
+                    missing_parts.append(_yahoo_history(symbol, missing_start, missing_end))
+
         merged = pd.concat(missing_parts, ignore_index=True).drop_duplicates("date").sort_values("date")
-        write_cache(merged)
+        if len(merged) > len(cached):
+            write_cache(merged)
         return merged[(merged["date"].dt.date >= start) & (merged["date"].dt.date <= end)].copy()
 
-    df = client.history_chunked(symbol, start, end)
-    if not cached.empty:
+    try:
+        df = client.history_chunked(symbol, start, end)
+    except Exception:
+        df = pd.DataFrame()
+
+    # FYERS remains primary. Yahoo is used only when FYERS returns no usable history.
+    if df.empty:
+        df = _yahoo_history(symbol, start, end)
+
+    if not cached.empty and not df.empty:
         df = pd.concat([cached, df], ignore_index=True).drop_duplicates("date").sort_values("date")
-    write_cache(df)
+    elif not cached.empty:
+        df = cached
+
+    if not df.empty:
+        write_cache(df)
     return df[(df["date"].dt.date >= start) & (df["date"].dt.date <= end)].copy()
