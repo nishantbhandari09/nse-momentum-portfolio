@@ -139,7 +139,7 @@ def _has_nifty_constituents(catalog: pd.DataFrame, group: str) -> bool:
     if catalog.empty or "groups" not in catalog.columns:
         return False
     mask = catalog["groups"].fillna("").astype(str).str.contains(
-        rf"(?:^|\\|){re.escape(group)}(?:\\||$)", regex=True, na=False
+        rf"(?:^|\|){re.escape(group)}(?:\||$)", regex=True, na=False
     )
     # The index itself is not a constituent. Require at least a small set of EQ rows.
     return int((mask & catalog["symbol"].astype(str).str.endswith("-EQ")).sum()) >= 5
