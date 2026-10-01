@@ -264,12 +264,28 @@ def get_history_cached(client: FyersClient, symbol: str, start: date, end: date,
         if cached["date"].min().date() <= start and cached["date"].max().date() >= end:
             return cached[(cached["date"].dt.date >= start) & (cached["date"].dt.date <= end)].copy()
         missing_parts: List[pd.DataFrame] = [cached]
+
         if start < cached["date"].min().date():
-            missing_parts.append(client.history_chunked(symbol, start, cached["date"].min().date() - timedelta(days=1)))
+            missing_start = start
+            missing_end = cached["date"].min().date() - timedelta(days=1)
+            try:
+                missing_parts.append(client.history_chunked(symbol, missing_start, missing_end))
+            except Exception:
+                if not symbol.upper().endswith("-INDEX"):
+                    missing_parts.append(_yahoo_history(symbol, missing_start, missing_end))
+
         if end > cached["date"].max().date():
-            missing_parts.append(client.history_chunked(symbol, cached["date"].max().date() + timedelta(days=1), end))
+            missing_start = cached["date"].max().date() + timedelta(days=1)
+            missing_end = end
+            try:
+                missing_parts.append(client.history_chunked(symbol, missing_start, missing_end))
+            except Exception:
+                if not symbol.upper().endswith("-INDEX"):
+                    missing_parts.append(_yahoo_history(symbol, missing_start, missing_end))
+
         merged = pd.concat(missing_parts, ignore_index=True).drop_duplicates("date").sort_values("date")
-        write_cache(merged)
+        if len(merged) > len(cached):
+            write_cache(merged)
         return merged[(merged["date"].dt.date >= start) & (merged["date"].dt.date <= end)].copy()
 
     try:
