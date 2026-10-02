@@ -557,7 +557,7 @@ elif page == "Live Monitor":
     live_snapshot()
 
 elif page == "Monthly Backtest":
-    st.header("3. Monthly / Quarterly Backtest")
+    st.header("4. Monthly / Quarterly Backtest")
     st.write("Historical signals use the rebalance close; trades execute at the next available trading-day open to avoid look-ahead bias. Existing holdings can exit even while the market gate blocks new entries.")
     strategies=list_strategies()
     if not strategies:
@@ -611,7 +611,7 @@ elif page == "Monthly Backtest":
         st.download_button("Download Equity Curve CSV", result["equity"].to_csv(index=False), "backtest_equity_curve.csv", "text/csv")
 
 elif page == "Data Manager":
-    st.header("4. Data Manager")
+    st.header("5. Data Manager")
     st.write("FYERS is the market-data source. The Data Manager syncs the current symbol master and stores historical candles locally in Parquet for scanning and backtesting.")
     c1,c2,c3,c4=st.columns(4)
     if c1.button("⬇ Sync FYERS NSE Symbol Master", use_container_width=True):
@@ -671,7 +671,7 @@ elif page == "Data Manager":
         st.caption("Dynamic groups include ALL ETF, DOMESTIC ETF, INTERNATIONAL ETF, DEFENSIVE, and ALL INDEX. Edit universe_groups.csv for additional custom group mappings.")
 
 elif page == "Saved Strategies":
-    st.header("5. Saved Strategies")
+    st.header("6. Saved Strategies")
     strategies=list_strategies()
     if not strategies:
         st.info("No saved strategies yet. Save one from Scanner.")
