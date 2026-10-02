@@ -101,7 +101,7 @@ with st.sidebar:
         login_url = build_login_url(state="momentum")
         st.markdown(f"[**🔐 Connect FYERS**]({login_url})")
     st.divider()
-    page = st.radio("Section", ["Scanner", "Portfolio", "Monthly Backtest", "Data Manager", "Saved Strategies"], index=0)
+    page = st.radio("Section", ["Scanner", "Portfolio", "Live Monitor", "Monthly Backtest", "Data Manager", "Saved Strategies"], index=0)
 
 
 def default_strategy() -> dict:
@@ -378,9 +378,8 @@ elif page == "Portfolio":
     cap4.metric("Total Strategy Capital", money(summary["total_capital"]))
     st.write(f"Investment: **{money(summary['investment'])}** · Add Funds: **{money(summary['add_funds'])}** · Virtual cash: **{money(summary['virtual_cash'])}**")
 
-    mode = st.radio("Execution Mode", ["VIRTUAL", "REAL"], horizontal=True, help="VIRTUAL updates the model portfolio. REAL places live FYERS orders after confirmation.")
-    if mode == "REAL":
-        st.warning("REAL mode sends live FYERS orders. Use only after checking every symbol, quantity and amount in the proposal.")
+    mode = "VIRTUAL"
+    st.info("Live FYERS order execution is intentionally disabled in Version 2. The app is data + scanner + portfolio monitoring only.")
     scan = st.session_state.get("last_scan", pd.DataFrame())
     if scan.empty:
         st.info("Run the Scanner first. The Portfolio section executes the latest saved/current scan against the selected strategy.")
@@ -466,6 +465,96 @@ elif page == "Portfolio":
     st.subheader("Transaction History")
     hist=transaction_history(sid, mode)
     st.dataframe(hist, use_container_width=True, hide_index=True)
+
+elif page == "Live Monitor":
+    st.header("3. Live Monitor")
+    st.write("FYERS live quotes + current holdings + scanner signals. This page does not place orders.")
+    if client is None:
+        st.warning("Connect FYERS first using the button in the sidebar.")
+        st.stop()
+
+    monitor_strategy_id = st.session_state.get("selected_strategy_id")
+    strategies = list_strategies()
+    if not strategies:
+        st.info("Save a strategy in Scanner first.")
+        st.stop()
+    ids = [x["id"] for x in strategies]
+    if monitor_strategy_id not in ids:
+        monitor_strategy_id = ids[0]
+    monitor_strategy_id = st.selectbox("Strategy", ids, index=ids.index(monitor_strategy_id), format_func=lambda i: next(x["name"] for x in strategies if x["id"] == i), key="monitor_strategy")
+    st.session_state["selected_strategy_id"] = monitor_strategy_id
+    monitor_cfg = get_strategy(int(monitor_strategy_id))["config"]
+
+    refresh_minutes = st.selectbox("Auto-refresh", [0, 1, 5, 15], index=2, format_func=lambda x: "Manual" if x == 0 else f"Every {x} minute(s)", key="monitor_refresh")
+    if refresh_minutes == 0:
+        if st.button("🔄 Refresh Live Data", type="primary"):
+            st.rerun()
+    else:
+        st.caption("The monitor refreshes while this Streamlit page is open. FYERS authentication and API limits still apply.")
+
+    @st.fragment(run_every=f"{refresh_minutes}m" if refresh_minutes else None)
+    def live_snapshot():
+        now = pd.Timestamp.now(tz="Asia/Kolkata")
+        st.caption(f"Last refresh: {now.strftime('%d %b %Y, %H:%M:%S IST')}")
+        c1, c2, c3 = st.columns(3)
+        try:
+            status = client.market_status()
+            c1.metric("FYERS", "CONNECTED")
+            c2.metric("Market API", "OK")
+            c3.metric("Market Status", str(status.get("data", status.get("s", "available"))))
+        except Exception as e:
+            c1.metric("FYERS", "CONNECTED")
+            c2.metric("Market API", "ERROR")
+            c3.caption(str(e))
+
+        st.subheader("Current FYERS Holdings")
+        live = live_holdings_df(client)
+        managed = set(get_managed_symbols(int(monitor_strategy_id), "REAL"))
+        # Version 2 treats FYERS as a read-only live data source; show all holdings rather than requiring prior app-managed orders.
+        if live.empty:
+            st.info("FYERS currently reports no holdings.")
+        else:
+            symbols = live["symbol"].dropna().astype(str).tolist()
+            prices = price_from_quotes(client, symbols)
+            live["ltp"] = live["symbol"].map(prices)
+            live["market_value"] = live["qty"] * live["ltp"]
+            live["unrealized_pnl"] = live["qty"] * (live["ltp"] - live["avg_price"])
+            live["pnl_pct"] = np.where(live["avg_price"] > 0, live["unrealized_pnl"] / (live["qty"] * live["avg_price"]), np.nan)
+            st.dataframe(live, use_container_width=True, hide_index=True)
+
+        st.subheader("Live Momentum Signal")
+        if st.button("🔎 Refresh Momentum Scan", key="live_scan_button") or "live_scan" not in st.session_state:
+            try:
+                ranked, meta = scan_strategy(monitor_cfg, date.today(), client=client, auto_fetch=True)
+                st.session_state["live_scan"] = ranked
+                st.session_state["live_scan_meta"] = meta
+            except Exception as e:
+                st.error(f"Live scan failed: {e}")
+        ranked = st.session_state.get("live_scan", pd.DataFrame())
+        if not ranked.empty:
+            held_symbols = set(live["symbol"].tolist()) if not live.empty else set()
+            view = ranked.copy()
+            view["signal"] = np.where(view["symbol"].isin(held_symbols), "HOLD / MONITOR", np.where(view["rank"] <= monitor_cfg["top_n"], "ENTRY CANDIDATE", "WATCH"))
+            st.dataframe(view.head(max(50, int(monitor_cfg["top_n"] * 2))), use_container_width=True, hide_index=True)
+
+        st.subheader("Alerts")
+        alerts = []
+        if not live.empty and not ranked.empty:
+            rank_map = dict(zip(ranked["symbol"], ranked["rank"]))
+            for _, row in live.iterrows():
+                sym = row["symbol"]
+                rank = rank_map.get(sym, 999999)
+                if rank > monitor_cfg["exit_rank"]:
+                    alerts.append({"severity": "EXIT-RANK", "symbol": sym, "rank": rank, "message": f"{sym} is outside exit rank {monitor_cfg['exit_rank']}."})
+                elif rank <= monitor_cfg["top_n"]:
+                    alerts.append({"severity": "IN TOP N", "symbol": sym, "rank": rank, "message": f"{sym} remains inside Top {monitor_cfg['top_n']}."})
+        if alerts:
+            adf = pd.DataFrame(alerts)
+            st.dataframe(adf, use_container_width=True, hide_index=True)
+        else:
+            st.success("No rank-based portfolio alerts from the latest live scan.")
+
+    live_snapshot()
 
 elif page == "Monthly Backtest":
     st.header("3. Monthly / Quarterly Backtest")
