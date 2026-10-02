@@ -12,6 +12,11 @@ from urllib.parse import urlencode
 import pandas as pd
 import requests
 
+try:
+    from fyers_apiv3 import fyersModel
+except Exception:
+    fyersModel = None
+
 BASE_URL = "https://api-t1.fyers.in/api/v3"
 DATA_URL = "https://api-t1.fyers.in/data"
 SYMBOL_MASTER_URLS = {
@@ -74,9 +79,25 @@ def get_default_access_token() -> str:
 
 
 def build_login_url(state: str = "momentum") -> str:
+    app_id = get_app_id()
+    secret = get_secret_id()
+    redirect_uri = get_redirect_uri()
+    if not app_id or not secret or not redirect_uri:
+        raise ValueError("FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI are required in Streamlit Secrets.")
+    if fyersModel is not None:
+        session = fyersModel.SessionModel(
+            client_id=app_id.strip(),
+            secret_key=secret.strip(),
+            redirect_uri=redirect_uri.strip(),
+            response_type="code",
+            state=state,
+            grant_type="authorization_code",
+        )
+        return session.generate_authcode()
+
     params = {
-        "client_id": get_app_id(),
-        "redirect_uri": get_redirect_uri(),
+        "client_id": app_id,
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "state": state,
     }
@@ -84,21 +105,57 @@ def build_login_url(state: str = "momentum") -> str:
 
 
 def exchange_auth_code(auth_code: str) -> Dict[str, Any]:
-    app_id = get_app_id()
-    secret = get_secret_id()
-    if not app_id or not secret:
-        raise ValueError("FYERS_APP_ID and FYERS_SECRET_ID are required in Streamlit Secrets.")
+    app_id = get_app_id().strip()
+    secret = get_secret_id().strip()
+    redirect_uri = get_redirect_uri().strip()
+    auth_code = str(auth_code).strip()
+
+    if not app_id or not secret or not redirect_uri:
+        raise ValueError("FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI are required in Streamlit Secrets.")
+    if not auth_code:
+        raise ValueError("FYERS did not return an auth_code.")
+
+    # Prefer the official v3 SDK SessionModel. It performs the same
+    # SHA-256 appIdHash + auth-code exchange documented by FYERS.
+    if fyersModel is not None:
+        session = fyersModel.SessionModel(
+            client_id=app_id,
+            secret_key=secret,
+            redirect_uri=redirect_uri,
+            response_type="code",
+            grant_type="authorization_code",
+        )
+        session.set_token(auth_code)
+        data = session.generate_token()
+        if isinstance(data, dict) and data.get("s") == "ok" and data.get("access_token"):
+            return data
+        raise RuntimeError(
+            "FYERS token exchange was rejected. "
+            f"Response: {data}. Check that the App ID/Secret belong to the same "
+            f"activated v3 app, the redirect URI is an exact match, and the auth_code is freshly generated."
+        )
+
     app_hash = hashlib.sha256(f"{app_id}:{secret}".encode("utf-8")).hexdigest()
     payload = {
         "grant_type": "authorization_code",
         "appIdHash": app_hash,
         "code": auth_code,
     }
-    r = requests.post(f"{BASE_URL}/validate-authcode", json=payload, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if data.get("s") != "ok" or not data.get("access_token"):
-        raise RuntimeError(f"FYERS token exchange failed: {data}")
+    response = requests.post(
+        f"{BASE_URL}/validate-authcode",
+        json=payload,
+        timeout=30,
+    )
+    try:
+        data = response.json()
+    except Exception:
+        data = {"s": "error", "http_status": response.status_code, "body": response.text[:1000]}
+
+    if response.status_code >= 400 or data.get("s") != "ok" or not data.get("access_token"):
+        raise RuntimeError(
+            f"FYERS token exchange failed (HTTP {response.status_code}). "
+            f"Response: {data}. Check App ID/Secret, exact redirect URI and fresh auth_code."
+        )
     return data
 
 
