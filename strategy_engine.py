@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -17,6 +17,9 @@ INDEX_DIR = Path("data/indices")
 HISTORY_CONSTITUENTS = Path("historical_constituents.csv")
 
 LOOKBACK_DEFAULTS = [252, 120, 90, 60]
+
+# Process-level cache so repeated Streamlit reruns reuse loaded history.
+_MEMORY_HISTORY_CACHE: Dict[str, pd.DataFrame] = {}
 
 
 def clean_symbol(symbol: str) -> str:
@@ -69,24 +72,100 @@ def save_history(df: pd.DataFrame, symbol: str, index: bool = False) -> Path:
         return csv_path
 
 
+def _slice_history(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
+    if df is None or df.empty or "date" not in df.columns:
+        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    x = df.copy()
+    x["date"] = pd.to_datetime(x["date"], errors="coerce").dt.normalize()
+    x = x.dropna(subset=["date"])
+    return x[(x["date"].dt.date >= start) & (x["date"].dt.date <= end)].copy()
+
+
+def _live_number(payload: Mapping[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def apply_live_bar(
+    hist: pd.DataFrame,
+    symbol: str,
+    asof: date,
+    live_snapshot: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> pd.DataFrame:
+    """Overlay today's FYERS SymbolUpdate on cached daily history."""
+    if not live_snapshot or symbol not in live_snapshot or hist.empty:
+        return hist
+    payload = live_snapshot.get(symbol) or {}
+    ltp = _live_number(payload, "ltp", "last_price")
+    if ltp is None or ltp <= 0:
+        return hist
+
+    day = pd.Timestamp(asof).normalize()
+    open_price = _live_number(payload, "open_price", "open") or ltp
+    high_price = _live_number(payload, "high_price", "high") or ltp
+    low_price = _live_number(payload, "low_price", "low") or ltp
+    volume = _live_number(payload, "vol_traded_today", "volume")
+
+    x = hist.copy()
+    x["date"] = pd.to_datetime(x["date"], errors="coerce").dt.normalize()
+    x = x.dropna(subset=["date"])
+    fallback_volume = 0.0
+    if "volume" in x.columns and not x.empty:
+        try:
+            fallback_volume = float(x.iloc[-1]["volume"])
+        except Exception:
+            fallback_volume = 0.0
+
+    row = {
+        "date": day,
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": ltp,
+        "volume": volume if volume is not None else fallback_volume,
+    }
+    x = x[x["date"] != day]
+    x = pd.concat([x, pd.DataFrame([row])], ignore_index=True)
+    return x.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
+
+
 def load_history_for_symbol(symbol: str, start: date, end: date, client: Optional[FyersClient] = None,
                              allow_fetch: bool = False) -> pd.DataFrame:
     is_index = "-INDEX" in symbol.upper()
     cache_dir = INDEX_DIR if is_index else PRICE_DIR
 
-    # Always allow FYERS to extend/repair the requested date range. This fixes the
-    # case where a local file exists but does not contain the full backtest period.
+    memory = _MEMORY_HISTORY_CACHE.get(symbol)
+    if memory is not None and not memory.empty:
+        memory = memory.copy()
+        dates = pd.to_datetime(memory["date"], errors="coerce")
+        if not dates.dropna().empty:
+            min_date = dates.min().date()
+            max_date = dates.max().date()
+            if min_date <= start and max_date >= end:
+                return _slice_history(memory, start, end)
+
+    # Allow FYERS to extend/repair the requested range only when explicitly requested.
     if allow_fetch and client:
         fetched = get_history_cached(client, symbol, start, end, str(cache_dir))
         if not fetched.empty:
             save_history(fetched, symbol, index=is_index)
-            return fetched
+            _MEMORY_HISTORY_CACHE[symbol] = fetched.copy()
+            return _slice_history(fetched, start, end)
+
+    if memory is not None and not memory.empty:
+        return _slice_history(memory, start, end)
 
     df = _load_local_history(symbol)
     if df.empty:
         return df
-    mask = df["date"].apply(lambda x: x.date() if pd.notna(x) else None)
-    return df[(mask >= start) & (mask <= end)].copy()
+    _MEMORY_HISTORY_CACHE[symbol] = df.copy()
+    return _slice_history(df, start, end)
 
 
 def normalize_lookbacks(raw: Dict | None) -> Dict[int, float]:
@@ -180,12 +259,17 @@ def point_in_time_universe(group: str, asof: date, catalog: Optional[pd.DataFram
 
 def rank_symbols(symbols: Iterable[str], asof: pd.Timestamp, lookbacks: Dict[int, float],
                   start: date, end: date, client: Optional[FyersClient] = None,
-                  allow_fetch: bool = False) -> pd.DataFrame:
+                  allow_fetch: bool = False,
+                  history_map: Optional[Mapping[str, pd.DataFrame]] = None,
+                  live_snapshot: Optional[Mapping[str, Mapping[str, Any]]] = None) -> pd.DataFrame:
     rows = []
     for symbol in symbols:
-        hist = load_history_for_symbol(
-            symbol, start, end, client=client, allow_fetch=allow_fetch
-        )
+        hist = history_map.get(symbol) if history_map is not None else None
+        if hist is None:
+            hist = load_history_for_symbol(
+                symbol, start, end, client=client, allow_fetch=allow_fetch
+            )
+        hist = apply_live_bar(hist, symbol, asof.date(), live_snapshot)
         if hist.empty:
             continue
         returns = {n: _return(hist, int(n), asof) for n in lookbacks}
@@ -220,6 +304,8 @@ def apply_scan_conditions(
     client: Optional[FyersClient] = None,
     start: Optional[date] = None,
     allow_fetch: bool = False,
+    history_map: Optional[Mapping[str, pd.DataFrame]] = None,
+    live_snapshot: Optional[Mapping[str, Mapping[str, Any]]] = None,
 ) -> pd.DataFrame:
     if ranked.empty:
         return ranked
@@ -228,10 +314,13 @@ def apply_scan_conditions(
     keep = pd.Series(True, index=out.index)
     for i, row in out.iterrows():
         symbol_start = start or (asof - timedelta(days=550))
-        hist = load_history_for_symbol(
-            row["symbol"], symbol_start, asof,
-            client=client, allow_fetch=allow_fetch
-        )
+        hist = history_map.get(row["symbol"]) if history_map is not None else None
+        if hist is None:
+            hist = load_history_for_symbol(
+                row["symbol"], symbol_start, asof,
+                client=client, allow_fetch=allow_fetch
+            )
+        hist = apply_live_bar(hist, row["symbol"], asof, live_snapshot)
         if hist.empty:
             keep.loc[i] = False
             continue
@@ -293,31 +382,60 @@ def scan_strategy(
     asof: date,
     client: Optional[FyersClient] = None,
     auto_fetch: bool = True,
+    live_snapshot: Optional[Mapping[str, Mapping[str, Any]]] = None,
+    progress_callback: Optional[Any] = None,
 ) -> Tuple[pd.DataFrame, Dict]:
     group = strategy["group"]
     lookbacks = normalize_lookbacks(strategy.get("lookbacks"))
     conditions = strategy.get("conditions", {}) or {}
     ema_period = int(conditions.get("ema_period", 50))
-    history_days = max(max(lookbacks.keys()) * 2 + 60, 600, ema_period * 3)
+    history_days = max(max(lookbacks.keys()) + 180, 450, ema_period * 3)
     start = asof - timedelta(days=history_days)
     end = asof
     symbols = point_in_time_universe(group, asof)
+
+    # Load history once per symbol, then reuse the same in-memory frame for ranking
+    # and technical filters.
+    history_map: Dict[str, pd.DataFrame] = {}
+    missing: List[str] = []
+    total = len(symbols)
+    for idx, symbol in enumerate(symbols, start=1):
+        hist = load_history_for_symbol(
+            symbol, start, end, client=client, allow_fetch=bool(auto_fetch)
+        )
+        if hist.empty:
+            missing.append(symbol)
+        else:
+            history_map[symbol] = hist
+        if progress_callback is not None:
+            try:
+                progress_callback(idx, total)
+            except Exception:
+                pass
+
     ranked = rank_symbols(
         symbols, pd.Timestamp(asof), lookbacks, start, end,
-        client=client, allow_fetch=bool(auto_fetch)
+        client=client, allow_fetch=False,
+        history_map=history_map, live_snapshot=live_snapshot,
     )
     ranked = apply_scan_conditions(
         ranked, strategy, asof,
-        client=client, start=start, allow_fetch=bool(auto_fetch)
+        client=client, start=start, allow_fetch=False,
+        history_map=history_map, live_snapshot=live_snapshot,
     )
     status = {
         "universe_size": len(symbols),
+        "history_loaded": len(history_map),
+        "history_missing": len(missing),
+        "missing_symbols": missing[:25],
         "ranked_size": len(ranked),
         "asof": str(asof),
         "group": group,
         "history_start": str(start),
         "history_end": str(end),
         "auto_fetch": bool(auto_fetch),
+        "live_symbols": len(live_snapshot or {}),
+        "live_overlay": bool(live_snapshot),
     }
     return ranked, status
 
