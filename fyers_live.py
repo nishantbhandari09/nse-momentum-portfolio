@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -112,15 +111,28 @@ class FyersLiveDataManager:
         normalised = self._normalise_symbols(symbols)
         if not normalised:
             return
+
         with self._lock:
+            old_symbols = set(self._symbols)
+            new_symbols = set(normalised)
             self._symbols = normalised
-            if self._thread and self._thread.is_alive():
-                if self._connected and self._socket is not None:
+            socket = self._socket
+            connected = self._connected
+            alive = bool(self._thread and self._thread.is_alive())
+
+            if alive:
+                if connected and socket is not None:
+                    remove = sorted(old_symbols - new_symbols)
+                    add = sorted(new_symbols - old_symbols)
                     try:
-                        self._socket.subscribe(symbols=list(normalised), data_type="SymbolUpdate")
+                        if remove:
+                            socket.unsubscribe(symbols=remove, data_type="SymbolUpdate")
+                        if add:
+                            socket.subscribe(symbols=add, data_type="SymbolUpdate")
                     except Exception as exc:
                         self._last_error = f"Subscription update failed: {exc}"
                 return
+
             self._connecting = True
             self._thread = threading.Thread(
                 target=self._run,
