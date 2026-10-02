@@ -115,26 +115,8 @@ def exchange_auth_code(auth_code: str) -> Dict[str, Any]:
     if not auth_code:
         raise ValueError("FYERS did not return an auth_code.")
 
-    # Prefer the official v3 SDK SessionModel. It performs the same
-    # SHA-256 appIdHash + auth-code exchange documented by FYERS.
-    if fyersModel is not None:
-        session = fyersModel.SessionModel(
-            client_id=app_id,
-            secret_key=secret,
-            redirect_uri=redirect_uri,
-            response_type="code",
-            grant_type="authorization_code",
-        )
-        session.set_token(auth_code)
-        data = session.generate_token()
-        if isinstance(data, dict) and data.get("s") == "ok" and data.get("access_token"):
-            return data
-        raise RuntimeError(
-            "FYERS token exchange was rejected. "
-            f"Response: {data}. Check that the App ID/Secret belong to the same "
-            f"activated v3 app, the redirect URI is an exact match, and the auth_code is freshly generated."
-        )
-
+    # Use the documented v3 REST exchange directly so an empty/non-JSON
+    # FYERS response cannot be turned into an opaque JSONDecodeError by the SDK.
     app_hash = hashlib.sha256(f"{app_id}:{secret}".encode("utf-8")).hexdigest()
     payload = {
         "grant_type": "authorization_code",
@@ -143,19 +125,35 @@ def exchange_auth_code(auth_code: str) -> Dict[str, Any]:
     }
     response = requests.post(
         f"{BASE_URL}/validate-authcode",
+        headers={"Content-Type": "application/json"},
         json=payload,
         timeout=30,
+        allow_redirects=False,
     )
-    try:
-        data = response.json()
-    except Exception:
-        data = {"s": "error", "http_status": response.status_code, "body": response.text[:1000]}
 
-    if response.status_code >= 400 or data.get("s") != "ok" or not data.get("access_token"):
+    body = response.text.strip()
+    try:
+        data = response.json() if body else {}
+    except ValueError:
+        data = {}
+
+    if response.status_code >= 400:
+        detail = body[:1000] if body else "empty response body"
         raise RuntimeError(
             f"FYERS token exchange failed (HTTP {response.status_code}). "
-            f"Response: {data}. Check App ID/Secret, exact redirect URI and fresh auth_code."
+            f"Response body: {detail}. "
+            "Check that App ID/Secret belong to the same active v3 app, "
+            "the redirect URI exactly matches the FYERS app, and the auth_code is freshly generated."
         )
+
+    if not data.get("access_token"):
+        detail = body[:1000] if body else "empty response body"
+        raise RuntimeError(
+            f"FYERS returned no access token. HTTP {response.status_code}. "
+            f"Response: {detail}. "
+            "Generate a fresh auth_code and verify the FYERS app credentials and redirect URI."
+        )
+
     return data
 
 
