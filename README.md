@@ -1,56 +1,123 @@
-# NSE Momentum Portfolio & Quantitative Trading Platform 📈
+# NSE Momentum Portfolio
 
-A full-stack algorithmic trading and portfolio management application built specifically for the **National Stock Exchange (NSE)**. This platform allows quantitative investors to construct custom stock universes, run trend and momentum strategy scans, configure Market Trend Filters (MTF), execute portfolio rebalancing, and track live positions via the **FYERS API**.
+A Streamlit-based NSE momentum scanner, portfolio monitor, and backtesting application using **FYERS as the market-data source**.
 
----
+## Current scope
 
-## ✨ Features
+### Version 1
+- FYERS authentication and historical OHLCV data
+- Automatic local history cache
+- NIFTY 50 / 100 / 200 / 500 and BANKNIFTY groups
+- ETF / domestic ETF / international ETF / defensive / index groups
+- Weighted 252D / 120D / 90D / 60D momentum ranking
+- EMA and SMA filters
+- 52-week high / breakout filters
+- Market entry gate using EMA, SMA or VSTOP
+- Monthly / quarterly backtesting
+- Virtual portfolio
+- Strategy storage in SQLite
 
-- **📊 Dynamic Dashboard:** Comprehensive view of active strategies, portfolio performance, realized/unrealized P&L, and cash reserves.
-- **📁 Group & Universe Manager:** Dual-pane interface to curate custom stock lists into **Normal Momentum Pools** (e.g., Nifty 50, Midcap 100, Sectoral ETFs) or **Defensive Cash Proxies** (e.g., Liquid/Gold ETFs, GILT funds).
-- **⚙️ Strategy Builder Engine:** Define quantitative strategy parameters, target allocations, lookback periods, max holdings, and trailing stop-losses.
-- **🛡️ Market Trend Filter (MTF) & 200 EMA Rules:** Built-in market regime detection on index benchmarks (e.g., NIFTY 50) using **EMA** or **Volatile Stop (VSTOP)** overlays, combined with stock-level 200-day EMA trend checks.
-- **⚡ Rebalance Scanner:** Real-time scanner that evaluates stock momentum ranks, checks index regimes, generates BUY/SELL rebalance signals, and submits execution baskets directly to **FYERS**.
-- **📋 Live Positions Tracker:** Complete portfolio manager to track open positions, current market prices (CMP), P&L metrics, and manual order execution/closing.
+### Version 2
+- Live FYERS quotes
+- Current FYERS holdings view
+- Live momentum scan
+- Automatic live-monitor refresh
+- Rank-based HOLD / ENTRY / EXIT-RANK alerts
+- Read-only live monitoring
+- **No live order execution**
 
----
+The application deliberately keeps order execution disabled in Version 2. FYERS is used as the data source and account/holdings source only.
 
-## 🛠️ Tech Stack
+## Repository structure
 
-### **Frontend**
-- **Framework:** React 18 (Vite)
-- **Styling:** Tailwind CSS
-- **Icons:** Lucide React
-
-### **Backend**
-- **Framework:** Python (FastAPI)
-- **Market Data & Broker API:** FYERS API v3
-- **Data Processing:** Pandas, NumPy, TA-Lib
-
----
-
-## 📁 Repository Structure
-
-```text
+~~~text
 nse-momentum-portfolio/
-├── backend/
-│   ├── main.py               # FastAPI application & REST endpoints
-│   ├── requirements.txt      # Python dependencies
-│   ├── .env.example          # Sample environment credentials
-│   └── ...
-├── frontend/
-│   ├── package.json          # Node dependencies
-│   ├── vite.config.js        # Vite build configuration
-│   ├── src/
-│   │   ├── App.jsx           # Root layout & page router
-│   │   ├── main.jsx          # React entry point
-│   │   └── components/
-│   │       ├── Dashboard.jsx
-│   │       ├── GroupManager.jsx
-│   │       ├── StrategyBuilder.jsx
-│   │       ├── RebalanceScanner.jsx
-│   │       ├── PositionsTracker.jsx
-│   │       └── Navbar.jsx
-│   └── public/
+├── app.py
+├── fyers_data.py
+├── strategy_engine.py
+├── portfolio_store.py
+├── universe_manager.py
+├── requirements.txt
+├── universe_groups.csv
+├── historical_constituents.csv
 ├── .gitignore
-└── README.md
+├── .streamlit/
+│   └── config.toml
+└── data/
+    ├── prices/
+    ├── indices/
+    └── reference/
+~~~
+
+## Application flow
+
+~~~text
+Streamlit app.py
+      |
+      +--> fyers_data.py
+      |       +--> FYERS auth
+      |       +--> quotes
+      |       +--> historical candles
+      |       +--> holdings/funds
+      |
+      +--> universe_manager.py
+      |       +--> FYERS symbol master
+      |       +--> NIFTY constituent groups
+      |       +--> ETF / defensive groups
+      |
+      +--> strategy_engine.py
+      |       +--> momentum ranking
+      |       +--> technical filters
+      |       +--> market gate
+      |       +--> backtest
+      |
+      +--> portfolio_store.py
+              +--> strategies
+              +--> virtual holdings
+              +--> transactions
+              +--> capital
+~~~
+
+## Streamlit deployment
+
+- Repository: nishantbhandari09/nse-momentum-portfolio
+- Branch: main
+- Entrypoint: app.py
+
+requirements.txt is in the repository root so Streamlit Community Cloud can install the Python dependencies.
+
+## FYERS secrets
+
+Do **not** commit FYERS credentials to GitHub.
+
+For Streamlit Community Cloud, add these values in the app's Secrets settings:
+
+~~~toml
+FYERS_APP_ID = "your_fyers_app_id"
+FYERS_SECRET_ID = "your_fyers_secret_id"
+FYERS_REDIRECT_URI = "https://YOUR-APP-NAME.streamlit.app/"
+FYERS_ACCESS_TOKEN = ""
+~~~
+
+The deployed redirect URI must match the redirect URI configured in the FYERS application.
+
+For local development, use .streamlit/secrets.toml; that file is ignored by Git.
+
+## Data behaviour
+
+FYERS is the primary historical and live-data source.
+
+The app caches historical data locally as Parquet files. Missing ranges are requested automatically when a scan or backtest needs them. A small Yahoo Finance fallback remains only for symbols for which FYERS returns no usable history; it is not the primary source.
+
+## Running locally
+
+~~~bash
+pip install -r requirements.txt
+streamlit run app.py
+~~~
+
+## Streamlit Cloud
+
+Create the app from Streamlit Community Cloud using app.py as the entrypoint, then add the FYERS secrets in the Cloud Secrets panel.
+
+Version 2 is a research and monitoring tool and does not submit trades.
