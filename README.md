@@ -18,9 +18,10 @@ A Streamlit-based NSE momentum scanner, portfolio monitor, and backtesting appli
 - Strategy storage in SQLite
 
 ### Version 2
-- Live FYERS quotes
+- FYERS v3 Market Data WebSocket for live prices and volume
+- Persistent WebSocket connection with dynamic symbol subscriptions
 - Current FYERS holdings view
-- Live momentum scan
+- Live momentum scan using cached history plus today's live OHLCV bar
 - Automatic live-monitor refresh
 - Rank-based HOLD / ENTRY / EXIT-RANK alerts
 - Read-only live monitoring
@@ -56,9 +57,9 @@ Streamlit app.py
       |
       +--> fyers_data.py
       |       +--> FYERS auth
-      |       +--> quotes
-      |       +--> historical candles
+      |       +--> REST historical candles
       |       +--> holdings/funds
+      |       +--> live WebSocket feed (fyers_live.py)
       |
       +--> universe_manager.py
       |       +--> FYERS symbol master
@@ -107,7 +108,13 @@ For local development, use .streamlit/secrets.toml; that file is ignored by Git.
 
 FYERS is the primary historical and live-data source.
 
-The app caches historical data locally as Parquet files. Missing ranges are requested automatically when a scan or backtest needs them. A small Yahoo Finance fallback remains only for symbols for which FYERS returns no usable history; it is not the primary source.
+Historical candles are cached locally as Parquet files. The scanner loads each symbol's history once and reuses it for both momentum ranking and technical filters, so repeated scans do not make duplicate history reads.
+
+During a live/today scan, the FYERS v3 WebSocket overlays the latest SymbolUpdate values (LTP, OHLC and traded volume) on top of the cached daily history. FYERS currently documents a 5,000-symbol concurrent WebSocket subscription cap, so a NIFTY 500 universe fits inside one data socket. The Live Monitor uses this same persistent connection and does not poll the quotes endpoint in a loop.
+
+The first historical preload is still a separate job: if a symbol has no local history, the app may need to download it from FYERS. Once the cache is populated, live scans use cached history and the WebSocket feed.
+
+A small Yahoo Finance fallback remains only for symbols for which FYERS returns no usable history; it is not the primary source.
 
 ## Running locally
 
