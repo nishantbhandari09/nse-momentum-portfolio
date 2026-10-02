@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from fyers_data import FyersClient, build_login_url, exchange_auth_code, get_default_access_token, download_symbol_master, get_history_cached
+from fyers_data import FyersClient, build_login_url, exchange_auth_code, get_default_access_token, get_app_id, download_symbol_master, get_history_cached
 from portfolio_store import (
     add_capital,
     capital_summary,
@@ -25,8 +25,9 @@ from portfolio_store import (
     unmark_managed,
     update_virtual_cash,
 )
-from strategy_engine import backtest_strategy, scan_strategy, load_history_for_symbol, clean_symbol
+from strategy_engine import backtest_strategy, scan_strategy, load_history_for_symbol, clean_symbol, point_in_time_universe
 from universe_manager import available_groups, load_catalog, refresh_catalog, sync_nifty_constituents, symbols_for_group, CATALOG_PATH
+from fyers_live import FyersLiveDataManager
 
 st.set_page_config(page_title="NSE Momentum Portfolio", page_icon="📈", layout="wide")
 
@@ -61,6 +62,20 @@ def client_from_session() -> FyersClient | None:
         return FyersClient(token)
     except Exception:
         return None
+
+
+@st.cache_resource(show_spinner=False)
+def get_live_feed(access_token: str, app_id: str, symbols: tuple[str, ...]) -> FyersLiveDataManager:
+    """Create one persistent FYERS market-data WebSocket per token + subscribed universe."""
+    feed = FyersLiveDataManager(access_token=access_token, app_id=app_id)
+    feed.start(symbols)
+    return feed
+
+
+def start_live_feed(c: FyersClient, group: str, asof: date) -> tuple[FyersLiveDataManager, dict[str, dict]]:
+    symbols = tuple(point_in_time_universe(group, asof))
+    feed = get_live_feed(c.access_token, c.app_id or get_app_id(), symbols)
+    return feed, feed.snapshot()
 
 
 def handle_fyers_callback() -> None:
@@ -269,6 +284,22 @@ def price_from_quotes(c: FyersClient, symbols: list[str]) -> dict[str, float]:
             out[sym] = float(lp)
     return out
 
+def price_from_live_feed(snapshot: dict[str, dict], symbols: list[str]) -> dict[str, float]:
+    wanted = set(symbols)
+    out: dict[str, float] = {}
+    for symbol, payload in snapshot.items():
+        if symbol not in wanted or not isinstance(payload, dict):
+            continue
+        value = payload.get("ltp") or payload.get("last_price")
+        try:
+            if value is not None and float(value) > 0:
+                out[symbol] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+
 
 def create_proposal(strategy: dict, mode: str, ranked: pd.DataFrame, strategy_id: int, c: FyersClient | None) -> tuple[pd.DataFrame, pd.DataFrame, float]:
     if mode == "VIRTUAL":
@@ -318,16 +349,48 @@ if page == "Scanner":
     scan_clicked = c2.button("🔎 SCAN STOCKS", type="primary", use_container_width=True)
     strategy_name = c3.text_input("Strategy name", "Momentum Strategy 20", key="scan_strategy_name")
     if scan_clicked:
-        with st.spinner("Checking FYERS history and scanning the selected universe..."):
+        with st.spinner("Preparing cached history, then scanning the universe..."):
             try:
                 if client is None:
-                    st.error("Connect FYERS first. The scanner now downloads missing history automatically from FYERS.")
+                    st.error("Connect FYERS first. The scanner downloads missing history automatically from FYERS.")
                     st.stop()
-                ranked, meta = scan_strategy(strategy, scan_date, client=client, auto_fetch=True)
+
+                live_snapshot = {}
+                if scan_date == date.today():
+                    try:
+                        feed, live_snapshot = start_live_feed(client, strategy["group"], scan_date)
+                        if not live_snapshot:
+                            st.caption("FYERS WebSocket started; waiting for live ticks. Cached daily history will be used until ticks arrive.")
+                    except Exception as live_exc:
+                        st.warning(f"Live WebSocket could not start; continuing with historical data: {live_exc}")
+
+                progress = st.progress(0, text="Loading 0/0 symbols...")
+
+                def on_progress(done: int, total: int) -> None:
+                    progress.progress(done / max(total, 1), text=f"Loading history {done}/{total} symbols...")
+
+                ranked, meta = scan_strategy(
+                    strategy,
+                    scan_date,
+                    client=client,
+                    auto_fetch=True,
+                    live_snapshot=live_snapshot,
+                    progress_callback=on_progress,
+                )
+                progress.empty()
                 st.session_state["last_scan"] = ranked
                 st.session_state["last_scan_meta"] = meta
                 st.session_state["last_scan_strategy"] = strategy
-                st.success(f"Scan completed: {len(ranked)} qualifying symbols from universe size {meta['universe_size']}.")
+                live_note = f" · live symbols: {meta['live_symbols']}" if meta.get("live_overlay") else ""
+                st.success(
+                    f"Scan completed: {len(ranked)} qualifying symbols from universe size {meta['universe_size']} "
+                    f"(history loaded {meta['history_loaded']}, missing {meta['history_missing']}{live_note})."
+                )
+                if meta.get("history_missing", 0):
+                    st.warning(
+                        f"{meta['history_missing']} symbols had no usable history. "
+                        "The first preload can take longer; future scans reuse the in-memory/local cache."
+                    )
             except Exception as e:
                 st.error(f"Scan failed: {e}")
     ranked = st.session_state.get("last_scan", pd.DataFrame())
@@ -468,7 +531,7 @@ elif page == "Portfolio":
 
 elif page == "Live Monitor":
     st.header("3. Live Monitor")
-    st.write("FYERS live quotes + current holdings + scanner signals. This page does not place orders.")
+    st.write("FYERS live WebSocket + cached daily history + scanner signals. This page does not place orders.")
     if client is None:
         st.warning("Connect FYERS first using the button in the sidebar.")
         st.stop()
@@ -481,61 +544,110 @@ elif page == "Live Monitor":
     ids = [x["id"] for x in strategies]
     if monitor_strategy_id not in ids:
         monitor_strategy_id = ids[0]
-    monitor_strategy_id = st.selectbox("Strategy", ids, index=ids.index(monitor_strategy_id), format_func=lambda i: next(x["name"] for x in strategies if x["id"] == i), key="monitor_strategy")
+    monitor_strategy_id = st.selectbox(
+        "Strategy", ids,
+        index=ids.index(monitor_strategy_id),
+        format_func=lambda i: next(x["name"] for x in strategies if x["id"] == i),
+        key="monitor_strategy"
+    )
     st.session_state["selected_strategy_id"] = monitor_strategy_id
     monitor_cfg = get_strategy(int(monitor_strategy_id))["config"]
 
-    refresh_minutes = st.selectbox("Auto-refresh", [0, 1, 5, 15], index=2, format_func=lambda x: "Manual" if x == 0 else f"Every {x} minute(s)", key="monitor_refresh")
+    try:
+        live_feed, initial_live_snapshot = start_live_feed(client, monitor_cfg["group"], date.today())
+    except Exception as e:
+        live_feed = None
+        initial_live_snapshot = {}
+        st.error(f"Could not start FYERS live data feed: {e}")
+
+    refresh_minutes = st.selectbox(
+        "Auto-refresh", [0, 1, 5, 15], index=2,
+        format_func=lambda x: "Manual" if x == 0 else f"Every {x} minute(s)",
+        key="monitor_refresh"
+    )
     if refresh_minutes == 0:
         if st.button("🔄 Refresh Live Data", type="primary"):
             st.rerun()
     else:
-        st.caption("The monitor refreshes while this Streamlit page is open. FYERS authentication and API limits still apply.")
+        st.caption("Prices/volume come from the FYERS WebSocket. Longer-term indicators use cached daily history.")
 
     @st.fragment(run_every=f"{refresh_minutes}m" if refresh_minutes else None)
     def live_snapshot():
         now = pd.Timestamp.now(tz="Asia/Kolkata")
         st.caption(f"Last refresh: {now.strftime('%d %b %Y, %H:%M:%S IST')}")
-        c1, c2, c3 = st.columns(3)
+
+        ws_status = live_feed.status() if live_feed is not None else {}
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("FYERS", "CONNECTED" if ws_status.get("connected") else "CONNECTING")
+        c2.metric("WebSocket symbols", str(ws_status.get("subscribed", 0)))
+        c3.metric("Symbols with ticks", str(ws_status.get("symbols_with_data", 0)))
+        c4.metric("Ticks received", str(ws_status.get("ticks_received", 0)))
+        if ws_status.get("last_error"):
+            st.caption(f"WebSocket: {ws_status['last_error']}")
+
         try:
             status = client.market_status()
-            c1.metric("FYERS", "CONNECTED")
-            c2.metric("Market API", "OK")
-            c3.metric("Market Status", str(status.get("data", status.get("s", "available"))))
+            st.caption(f"FYERS market status: {status.get('data', status.get('s', 'available'))}")
         except Exception as e:
-            c1.metric("FYERS", "CONNECTED")
-            c2.metric("Market API", "ERROR")
-            c3.caption(str(e))
+            st.caption(f"Market status unavailable: {e}")
+
+        current_live = live_feed.snapshot() if live_feed is not None else initial_live_snapshot
 
         st.subheader("Current FYERS Holdings")
         live = live_holdings_df(client)
-        managed = set(get_managed_symbols(int(monitor_strategy_id), "REAL"))
-        # Version 2 treats FYERS as a read-only live data source; show all holdings rather than requiring prior app-managed orders.
         if live.empty:
             st.info("FYERS currently reports no holdings.")
         else:
             symbols = live["symbol"].dropna().astype(str).tolist()
-            prices = price_from_quotes(client, symbols)
+            prices = price_from_live_feed(current_live, symbols)
+            missing_prices = [s for s in symbols if s not in prices]
+            if missing_prices:
+                prices.update(price_from_quotes(client, missing_prices))
             live["ltp"] = live["symbol"].map(prices)
             live["market_value"] = live["qty"] * live["ltp"]
             live["unrealized_pnl"] = live["qty"] * (live["ltp"] - live["avg_price"])
-            live["pnl_pct"] = np.where(live["avg_price"] > 0, live["unrealized_pnl"] / (live["qty"] * live["avg_price"]), np.nan)
+            live["pnl_pct"] = np.where(
+                live["avg_price"] > 0,
+                live["unrealized_pnl"] / (live["qty"] * live["avg_price"]),
+                np.nan
+            )
             st.dataframe(live, use_container_width=True, hide_index=True)
 
         st.subheader("Live Momentum Signal")
         if st.button("🔎 Refresh Momentum Scan", key="live_scan_button") or "live_scan" not in st.session_state:
             try:
-                ranked, meta = scan_strategy(monitor_cfg, date.today(), client=client, auto_fetch=True)
+                ranked, meta = scan_strategy(
+                    monitor_cfg,
+                    date.today(),
+                    client=client,
+                    auto_fetch=False,
+                    live_snapshot=current_live,
+                )
                 st.session_state["live_scan"] = ranked
                 st.session_state["live_scan_meta"] = meta
             except Exception as e:
                 st.error(f"Live scan failed: {e}")
+
         ranked = st.session_state.get("live_scan", pd.DataFrame())
+        meta = st.session_state.get("live_scan_meta", {})
+        if meta.get("history_missing", 0):
+            st.warning(
+                f"Live scan is using cached history only and is missing {meta['history_missing']} symbols. "
+                "Run the Scanner once to preload missing history; live refreshes will then stay fast."
+            )
         if not ranked.empty:
             held_symbols = set(live["symbol"].tolist()) if not live.empty else set()
             view = ranked.copy()
-            view["signal"] = np.where(view["symbol"].isin(held_symbols), "HOLD / MONITOR", np.where(view["rank"] <= monitor_cfg["top_n"], "ENTRY CANDIDATE", "WATCH"))
-            st.dataframe(view.head(max(50, int(monitor_cfg["top_n"] * 2))), use_container_width=True, hide_index=True)
+            view["signal"] = np.where(
+                view["symbol"].isin(held_symbols),
+                "HOLD / MONITOR",
+                np.where(view["rank"] <= monitor_cfg["top_n"], "ENTRY CANDIDATE", "WATCH")
+            )
+            st.dataframe(
+                view.head(max(50, int(monitor_cfg["top_n"] * 2))),
+                use_container_width=True,
+                hide_index=True
+            )
 
         st.subheader("Alerts")
         alerts = []
@@ -545,12 +657,21 @@ elif page == "Live Monitor":
                 sym = row["symbol"]
                 rank = rank_map.get(sym, 999999)
                 if rank > monitor_cfg["exit_rank"]:
-                    alerts.append({"severity": "EXIT-RANK", "symbol": sym, "rank": rank, "message": f"{sym} is outside exit rank {monitor_cfg['exit_rank']}."})
+                    alerts.append({
+                        "severity": "EXIT-RANK",
+                        "symbol": sym,
+                        "rank": rank,
+                        "message": f"{sym} is outside exit rank {monitor_cfg['exit_rank']}."
+                    })
                 elif rank <= monitor_cfg["top_n"]:
-                    alerts.append({"severity": "IN TOP N", "symbol": sym, "rank": rank, "message": f"{sym} remains inside Top {monitor_cfg['top_n']}."})
+                    alerts.append({
+                        "severity": "IN TOP N",
+                        "symbol": sym,
+                        "rank": rank,
+                        "message": f"{sym} remains inside Top {monitor_cfg['top_n']}."
+                    })
         if alerts:
-            adf = pd.DataFrame(alerts)
-            st.dataframe(adf, use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(alerts), use_container_width=True, hide_index=True)
         else:
             st.success("No rank-based portfolio alerts from the latest live scan.")
 
