@@ -65,16 +65,15 @@ def client_from_session() -> FyersClient | None:
 
 
 @st.cache_resource(show_spinner=False)
-def get_live_feed(access_token: str, app_id: str, symbols: tuple[str, ...]) -> FyersLiveDataManager:
-    """Create one persistent FYERS market-data WebSocket per token + subscribed universe."""
-    feed = FyersLiveDataManager(access_token=access_token, app_id=app_id)
-    feed.start(symbols)
-    return feed
+def get_live_feed(access_token: str, app_id: str) -> FyersLiveDataManager:
+    """Keep one persistent FYERS market-data WebSocket for the session."""
+    return FyersLiveDataManager(access_token=access_token, app_id=app_id)
 
 
 def start_live_feed(c: FyersClient, group: str, asof: date) -> tuple[FyersLiveDataManager, dict[str, dict]]:
     symbols = tuple(point_in_time_universe(group, asof))
-    feed = get_live_feed(c.access_token, c.app_id or get_app_id(), symbols)
+    feed = get_live_feed(c.access_token, c.app_id or get_app_id())
+    feed.start(symbols)
     return feed, feed.snapshot()
 
 
