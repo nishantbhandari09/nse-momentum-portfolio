@@ -45,9 +45,11 @@ nse-momentum-portfolio/
 ├── .streamlit/
 │   └── config.toml
 └── data/
-    ├── prices/
-    ├── indices/
-    └── reference/
+    ├── prices/             # stocks + legacy cache
+    ├── indices/             # broad/index history + legacy index cache
+    ├── sectors/             # sector-index history
+    ├── etfs/                # ETF history
+    └── reference/           # symbol master + universe catalog
 ~~~
 
 ## Application flow
@@ -55,15 +57,27 @@ nse-momentum-portfolio/
 ~~~text
 Streamlit app.py
       |
+      +--> market_data.py
+      |       +--> common history/quote interface
+      |       +--> asset classification
+      |       +--> cache routing
+      |       |
+      |       +--> FYERS provider (current primary source)
+      |       +--> Yahoo fallback for supported instruments
+      |
       +--> fyers_data.py
       |       +--> FYERS auth
-      |       +--> REST historical candles
-      |       +--> holdings/funds
-      |       +--> live WebSocket feed (fyers_live.py)
+      |       +--> REST history / quotes
+      |       +--> holdings / funds
+      |
+      +--> fyers_live.py
+      |       +--> FYERS WebSocket
+      |       +--> live LTP / OHLC / volume
       |
       +--> universe_manager.py
-      |       +--> FYERS symbol master
+      |       +--> symbol master
       |       +--> NIFTY constituent groups
+      |       +--> sector-index groups
       |       +--> ETF / defensive groups
       |
       +--> strategy_engine.py
@@ -106,15 +120,15 @@ For local development, use .streamlit/secrets.toml; that file is ignored by Git.
 
 ## Data behaviour
 
-FYERS is the primary historical and live-data source.
-
 Historical candles are cached locally as Parquet files. The scanner loads each symbol's history once and reuses it for both momentum ranking and technical filters, so repeated scans do not make duplicate history reads.
 
-During a live/today scan, the FYERS v3 WebSocket overlays the latest SymbolUpdate values (LTP, OHLC and traded volume) on top of the cached daily history. FYERS currently documents a 5,000-symbol concurrent WebSocket subscription cap, so a NIFTY 500 universe fits inside one data socket. The Live Monitor uses this same persistent connection and does not poll the quotes endpoint in a loop.
+market_data.py is the common interface used by the strategy layer. It classifies an instrument as STOCK, INDEX, SECTOR or ETF and routes its history to the appropriate cache directory. Existing files in the old data/prices and data/indices locations are still read and migrated into the newer asset-specific cache locations when used.
 
-The first historical preload is still a separate job: if a symbol has no local history, the app may need to download it from FYERS. Once the cache is populated, live scans use cached history and the WebSocket feed.
+A stock, index, sector index or ETF is therefore represented only by its symbol and optional metadata; there is no separate Python file for each instrument.
 
-A small Yahoo Finance fallback remains only for symbols for which FYERS returns no usable history; it is not the primary source.
+During a live/today scan, the FYERS v3 WebSocket overlays the latest SymbolUpdate values (LTP, OHLC and traded volume) on top of the cached daily history. The first historical preload is still a separate job; once the cache is populated, live scans use cached history and the WebSocket feed.
+
+The current primary provider is FYERS. A Yahoo fallback remains available through the existing FYERS history helper for supported instruments. The common interface is deliberately provider-neutral so another provider adapter can be added later without rewriting the scanner or strategy engine.
 
 ## Running locally
 
