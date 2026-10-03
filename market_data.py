@@ -130,6 +130,12 @@ def get_history_cached(
     if client is None:
         return load_cached_history(symbol, description, asset_type)
 
+    # If an older cache exists under data/prices or data/indices, seed the new
+    # asset-specific location before asking the provider for missing ranges.
+    legacy = load_cached_history(symbol, description, asset_type)
+    if not legacy.empty:
+        save_cached_history(legacy, symbol, description, kind)
+
     df = _fyers_history_cached(
         client,
         symbol,
