@@ -19,7 +19,30 @@ INTERNATIONAL_TERMS = re.compile(
 )
 DEFENSIVE_TERMS = re.compile(r"gold|g-sec|gsec|government|liquid|overnight|money market|treasury", re.I)
 ETF_TERMS = re.compile(r"etf|exchange traded", re.I)
-INDEX_TERMS = re.compile(r"-INDEX\b|INDEX$|INDEX", re.I)
+INDEX_TERMS = re.compile(r"-INDEX\\b|INDEX$|INDEX", re.I)
+
+# Sector/index groups are detected from the FYERS symbol-master description.
+# These are group labels, not separate data sources or files.
+SECTOR_GROUP_PATTERNS = {
+    "NIFTY_IT": r"nifty\\s*it|niftyit|information\\s*technology",
+    "NIFTY_BANK": r"nifty\\s*bank|niftybank",
+    "NIFTY_AUTO": r"nifty\\s*auto|niftyauto|automobile",
+    "NIFTY_PHARMA": r"nifty\\s*pharma|niftypharma|pharma",
+    "NIFTY_FMCG": r"nifty\\s*fmcg|niftyfmcg|fmcg",
+    "NIFTY_METAL": r"nifty\\s*metal|niftymetal|metal",
+    "NIFTY_REALTY": r"nifty\\s*realty|niftyrealty|realty",
+    "NIFTY_MEDIA": r"nifty\\s*media|niftymedia|media",
+    "NIFTY_FIN_SERVICE": r"nifty\\s*financial\\s*services?|niftyfinservice|financial\\s*services",
+    "NIFTY_PSU_BANK": r"nifty\\s*psu\\s*bank|niftypsubank|public\\s*sector\\s*bank",
+    "NIFTY_PVT_BANK": r"nifty\\s*pvt\\s*bank|niftypvtbank|private\\s*bank",
+    "NIFTY_ENERGY": r"nifty\\s*energy|niftyenergy|energy",
+    "NIFTY_OIL_GAS": r"nifty\\s*oil\\s*(and|&)\\s*gas|niftyoilandgas|oil\\s*(and|&)\\s*gas",
+    "NIFTY_CONSUMPTION": r"nifty\\s*consumption|niftyconsumption|consumption",
+    "NIFTY_COMMODITIES": r"nifty\\s*commodit|niftycommodit|commodit",
+    "NIFTY_INFRA": r"nifty\\s*infra|niftyinfra|infrastructure",
+    "NIFTY_MNC": r"nifty\\s*mnc|niftymnc|mnc",
+    "NIFTY_DEFENCE": r"nifty\\s*defen[cs]e|niftydefen[cs]e|defen[cs]e",
+}
 
 
 def _read_fyers_master(path: Path = MASTER_PATH) -> pd.DataFrame:
@@ -72,8 +95,9 @@ def build_catalog(master: pd.DataFrame) -> pd.DataFrame:
     intl = combined.str.contains(INTERNATIONAL_TERMS, regex=True, na=False)
     defensive = combined.str.contains(DEFENSIVE_TERMS, regex=True, na=False)
     groups: List[str] = []
-    for typ, inter, defens in zip(df["asset_type"], intl, defensive):
+    for idx, (typ, inter, defens) in enumerate(zip(df["asset_type"], intl, defensive)):
         g = ["ALL"]
+        text = combined.iloc[idx]
         if typ == "ETF":
             g.append("ALL_ETF")
             g.append("INTERNATIONAL_ETF" if inter else "DOMESTIC_ETF")
@@ -81,7 +105,12 @@ def build_catalog(master: pd.DataFrame) -> pd.DataFrame:
                 g.append("DEFENSIVE")
         if typ == "INDEX":
             g.append("ALL_INDEX")
-        groups.append("|".join(g))
+            for label, pattern in SECTOR_GROUP_PATTERNS.items():
+                if re.search(pattern, text, re.I):
+                    g.append("SECTOR_INDEX")
+                    g.append(label)
+                    g.append("SECTOR")
+        groups.append("|".join(dict.fromkeys(g)))
     df["groups"] = groups
     df["tradable"] = df["asset_type"].isin(["ETF", "OTHER"])
     return df[["symbol", "description", "instrument_type", "asset_type", "groups", "tradable"]].sort_values("symbol")
@@ -100,7 +129,7 @@ def merge_manual_groups(catalog: pd.DataFrame, manual_path: Path = MANUAL_GROUPS
     manual["symbol"] = manual["symbol"].astype(str).str.strip()
     manual["group"] = manual["group"].astype(str).str.strip().str.upper()
     mapping = manual.groupby("symbol")["group"].apply(list).to_dict()
-    extra = catalog["symbol"].map(lambda s: ",".join(mapping.get(s, [])))
+    extra = catalog["symbol"].map(lambda s: "|".join(mapping.get(s, [])))
     catalog = catalog.copy()
     catalog["groups"] = [
         "|".join(dict.fromkeys([p for p in str(a).split("|") if p] + ([b] if b else [])))
@@ -126,7 +155,7 @@ def load_catalog() -> pd.DataFrame:
 
 def available_groups(catalog: pd.DataFrame | None = None) -> List[str]:
     catalog = catalog if catalog is not None else load_catalog()
-    groups = {"ALL", "ALL_ETF", "DOMESTIC_ETF", "INTERNATIONAL_ETF", "DEFENSIVE", "ALL_INDEX"}
+    groups = {"ALL", "ALL_ETF", "DOMESTIC_ETF", "INTERNATIONAL_ETF", "DEFENSIVE", "ALL_INDEX", "SECTOR_INDEX"}
     if not catalog.empty:
         for raw in catalog["groups"].fillna(""):
             groups.update([x for x in str(raw).split("|") if x])
