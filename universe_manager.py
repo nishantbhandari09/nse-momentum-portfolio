@@ -19,29 +19,29 @@ INTERNATIONAL_TERMS = re.compile(
 )
 DEFENSIVE_TERMS = re.compile(r"gold|g-sec|gsec|government|liquid|overnight|money market|treasury", re.I)
 ETF_TERMS = re.compile(r"etf|exchange traded", re.I)
-INDEX_TERMS = re.compile(r"-INDEX\\b|INDEX$|INDEX", re.I)
+INDEX_TERMS = re.compile(r"-INDEX\b|INDEX$|INDEX", re.I)
 
 # Sector/index groups are detected from the FYERS symbol-master description.
 # These are group labels, not separate data sources or files.
 SECTOR_GROUP_PATTERNS = {
-    "NIFTY_IT": r"nifty\\s*it|niftyit|information\\s*technology",
-    "NIFTY_BANK": r"nifty\\s*bank|niftybank",
-    "NIFTY_AUTO": r"nifty\\s*auto|niftyauto|automobile",
-    "NIFTY_PHARMA": r"nifty\\s*pharma|niftypharma|pharma",
-    "NIFTY_FMCG": r"nifty\\s*fmcg|niftyfmcg|fmcg",
-    "NIFTY_METAL": r"nifty\\s*metal|niftymetal|metal",
-    "NIFTY_REALTY": r"nifty\\s*realty|niftyrealty|realty",
-    "NIFTY_MEDIA": r"nifty\\s*media|niftymedia|media",
-    "NIFTY_FIN_SERVICE": r"nifty\\s*financial\\s*services?|niftyfinservice|financial\\s*services",
-    "NIFTY_PSU_BANK": r"nifty\\s*psu\\s*bank|niftypsubank|public\\s*sector\\s*bank",
-    "NIFTY_PVT_BANK": r"nifty\\s*pvt\\s*bank|niftypvtbank|private\\s*bank",
-    "NIFTY_ENERGY": r"nifty\\s*energy|niftyenergy|energy",
-    "NIFTY_OIL_GAS": r"nifty\\s*oil\\s*(and|&)\\s*gas|niftyoilandgas|oil\\s*(and|&)\\s*gas",
-    "NIFTY_CONSUMPTION": r"nifty\\s*consumption|niftyconsumption|consumption",
-    "NIFTY_COMMODITIES": r"nifty\\s*commodit|niftycommodit|commodit",
-    "NIFTY_INFRA": r"nifty\\s*infra|niftyinfra|infrastructure",
-    "NIFTY_MNC": r"nifty\\s*mnc|niftymnc|mnc",
-    "NIFTY_DEFENCE": r"nifty\\s*defen[cs]e|niftydefen[cs]e|defen[cs]e",
+    "NIFTY_IT": r"nifty\s*it|niftyit|information\s*technology",
+    "NIFTY_BANK": r"nifty\s*bank|niftybank",
+    "NIFTY_AUTO": r"nifty\s*auto|niftyauto|automobile",
+    "NIFTY_PHARMA": r"nifty\s*pharma|niftypharma|pharma",
+    "NIFTY_FMCG": r"nifty\s*fmcg|niftyfmcg|fmcg",
+    "NIFTY_METAL": r"nifty\s*metal|niftymetal|metal",
+    "NIFTY_REALTY": r"nifty\s*realty|niftyrealty|realty",
+    "NIFTY_MEDIA": r"nifty\s*media|niftymedia|media",
+    "NIFTY_FIN_SERVICE": r"nifty\s*financial\s*services?|niftyfinservice|financial\s*services",
+    "NIFTY_PSU_BANK": r"nifty\s*psu\s*bank|niftypsubank|public\s*sector\s*bank",
+    "NIFTY_PVT_BANK": r"nifty\s*pvt\s*bank|niftypvtbank|private\s*bank",
+    "NIFTY_ENERGY": r"nifty\s*energy|niftyenergy|energy",
+    "NIFTY_OIL_GAS": r"nifty\s*oil\s*(and|&)\s*gas|niftyoilandgas|oil\s*(and|&)\s*gas",
+    "NIFTY_CONSUMPTION": r"nifty\s*consumption|niftyconsumption|consumption",
+    "NIFTY_COMMODITIES": r"nifty\s*commodit|niftycommodit|commodit",
+    "NIFTY_INFRA": r"nifty\s*infra|niftyinfra|infrastructure",
+    "NIFTY_MNC": r"nifty\s*mnc|niftymnc|mnc",
+    "NIFTY_DEFENCE": r"nifty\s*defen[cs]e|niftydefen[cs]e|defen[cs]e",
 }
 
 
