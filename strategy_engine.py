@@ -9,7 +9,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from fyers_data import FyersClient, get_history_cached
+from fyers_data import FyersClient
+from market_data import classify_symbol, get_history_cached, load_cached_history, save_cached_history
 from universe_manager import load_catalog, symbols_for_group
 
 PRICE_DIR = Path("data/prices")
@@ -26,33 +27,12 @@ def clean_symbol(symbol: str) -> str:
     return str(symbol).replace(":", "_").replace("/", "_").replace("?", "_")
 
 
-def _load_local_history(symbol: str, cache_dir: Path = PRICE_DIR) -> pd.DataFrame:
-    path = cache_dir / f"{clean_symbol(symbol)}.parquet"
-    csv_path = cache_dir / f"{clean_symbol(symbol)}.csv"
-    if not path.exists() and not csv_path.exists():
-        # Common fallback for index history.
-        path = INDEX_DIR / f"{clean_symbol(symbol)}.parquet"
-        csv_path = INDEX_DIR / f"{clean_symbol(symbol)}.csv"
-    if path.exists():
-        df = pd.read_parquet(path)
-    elif csv_path.exists():
-        df = pd.read_csv(csv_path)
-    else:
+def _load_local_history(symbol: str, cache_dir: Path | None = None) -> pd.DataFrame:
+    # The common data layer knows whether the instrument is a stock, index,
+    # sector index or ETF and checks both new and legacy cache locations.
+    df = load_cached_history(symbol, asset_type=classify_symbol(symbol))
+    if df.empty or "date" not in df.columns:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    if "date" not in df.columns:
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
-    parsed = pd.to_datetime(df["date"], errors="coerce")
-    normalized = []
-    for value in parsed:
-        if pd.isna(value):
-            normalized.append(pd.NaT)
-            continue
-        ts = pd.Timestamp(value)
-        if ts.tzinfo is not None:
-            ts = ts.tz_convert("Asia/Kolkata").tz_localize(None)
-        normalized.append(ts.normalize())
-    df["date"] = pd.Series(normalized, index=df.index)
-    df = df.dropna(subset=["date"])
     for col in ["open", "high", "low", "close", "volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -60,16 +40,7 @@ def _load_local_history(symbol: str, cache_dir: Path = PRICE_DIR) -> pd.DataFram
 
 
 def save_history(df: pd.DataFrame, symbol: str, index: bool = False) -> Path:
-    directory = INDEX_DIR if index else PRICE_DIR
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{clean_symbol(symbol)}.parquet"
-    try:
-        df.to_parquet(path, index=False)
-        return path
-    except Exception:
-        csv_path = directory / f"{clean_symbol(symbol)}.csv"
-        df.to_csv(csv_path, index=False)
-        return csv_path
+    return save_cached_history(df, symbol, asset_type=classify_symbol(symbol))
 
 
 def _slice_history(df: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
@@ -137,24 +108,25 @@ def apply_live_bar(
 
 def load_history_for_symbol(symbol: str, start: date, end: date, client: Optional[FyersClient] = None,
                              allow_fetch: bool = False) -> pd.DataFrame:
-    is_index = "-INDEX" in symbol.upper()
-    cache_dir = INDEX_DIR if is_index else PRICE_DIR
+    asset_type = classify_symbol(symbol)
 
     memory = _MEMORY_HISTORY_CACHE.get(symbol)
     if memory is not None and not memory.empty:
-        memory = memory.copy()
         dates = pd.to_datetime(memory["date"], errors="coerce")
         if not dates.dropna().empty:
-            min_date = dates.min().date()
-            max_date = dates.max().date()
-            if min_date <= start and max_date >= end:
+            if dates.min().date() <= start and dates.max().date() >= end:
                 return _slice_history(memory, start, end)
 
-    # Allow FYERS to extend/repair the requested range only when explicitly requested.
+    # The common market-data layer owns provider/caching decisions.
     if allow_fetch and client:
-        fetched = get_history_cached(client, symbol, start, end, str(cache_dir))
+        fetched = get_history_cached(
+            client,
+            symbol,
+            start,
+            end,
+            asset_type=asset_type,
+        )
         if not fetched.empty:
-            save_history(fetched, symbol, index=is_index)
             _MEMORY_HISTORY_CACHE[symbol] = fetched.copy()
             return _slice_history(fetched, start, end)
 
