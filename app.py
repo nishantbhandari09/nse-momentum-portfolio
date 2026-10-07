@@ -108,68 +108,10 @@ def fetch_market_data(tickers, period="5y"):
 # ==========================================
 # FYERS - LIVE PRICE OVERLAY
 # ==========================================
-def get_fyers_secret(*keys):
-    def normalize(value):
-        if value is None:
-            return ""
-        return str(value).strip()
-
-    candidates = []
-    for key in keys:
-        key_str = normalize(key)
-        if not key_str:
-            continue
-        candidates.extend([
-            key_str,
-            key_str.upper(),
-            key_str.lower(),
-            key_str.replace("_", " ").title(),
-            key_str.replace("_", ""),
-            key_str.replace("-", "").lower(),
-        ])
-
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        try:
-            if candidate in st.secrets:
-                value = normalize(st.secrets[candidate])
-                if value:
-                    return value
-        except Exception:
-            pass
-
-    try:
-        secret_sections = [
-            st.secrets.get("fyers"),
-            st.secrets.get("FYERS"),
-            st.secrets.get("broker"),
-            st.secrets.get("BROKER"),
-        ]
-        for section in secret_sections:
-            if not isinstance(section, dict):
-                continue
-            for key, value in section.items():
-                key_str = normalize(key)
-                if not key_str:
-                    continue
-                if key_str.lower() in {c.lower() for c in candidates}:
-                    val = normalize(value)
-                    if val:
-                        return val
-    except Exception:
-        pass
-
-    return ""
-
-
 def get_fyers_client():
     if "fyers_access_token" not in st.session_state:
         raise RuntimeError("not connected yet this session — use the Fyers Connection panel above")
     return get_authenticated_fyers(st.session_state["fyers_client_id"], st.session_state["fyers_access_token"])
-
 
 
 def render_fyers_connection_panel():
@@ -181,12 +123,17 @@ def render_fyers_connection_panel():
                 st.rerun()
             return
 
-        client_id = get_fyers_secret("FYERS_CLIENT_ID", "client_id", "CLIENT_ID")
-        secret_key = get_fyers_secret("FYERS_SECRET_KEY", "secret_key", "SECRET_KEY", "app_id", "secret_id")
-        redirect_uri = get_fyers_secret("FYERS_REDIRECT_URI", "redirect_uri", "REDIRECT_URI", "url_redirect", "redirect_url")
+        # Read secrets with the exact names you use in Streamlit
+        client_id = st.secrets.get("FYERS_CLIENT_ID", "")
+        app_id = st.secrets.get("FYERS_APP_ID", "")
+        secret_id = st.secrets.get("FYERS_SECRET_ID", "")
+        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI", "")
+        
+        # Use app_id or secret_id as the secret_key for FYERS API
+        secret_key = app_id or secret_id
 
         if not (client_id and secret_key and redirect_uri):
-            st.warning("Add FYERS_CLIENT_ID, FYERS_SECRET_KEY, and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
+            st.warning("Add FYERS_CLIENT_ID, FYERS_APP_ID, FYERS_SECRET_ID, and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
             return
 
         try:
