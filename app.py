@@ -108,10 +108,44 @@ def fetch_market_data(tickers, period="5y"):
 # ==========================================
 # FYERS - LIVE PRICE OVERLAY
 # ==========================================
+def get_fyers_secret(*keys):
+    seen = set()
+    for key in keys:
+        for candidate in (key, key.upper(), key.lower(), key.replace("_", " ").title(), key.replace("_", "")):
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                if candidate in st.secrets:
+                    value = st.secrets[candidate]
+                    if value not in (None, ""):
+                        return value
+            except Exception:
+                pass
+
+    nested = {}
+    try:
+        nested = st.secrets.get("fyers", {}) or {}
+    except Exception:
+        nested = {}
+    if isinstance(nested, dict):
+        for key in keys:
+            for candidate in (key, key.upper(), key.lower(), key.replace("_", " ").title(), key.replace("_", "")):
+                value = nested.get(candidate)
+                if value not in (None, ""):
+                    return value
+                for k, v in nested.items():
+                    if isinstance(k, str) and k.lower() == candidate.lower():
+                        return v
+    return ""
+
+
+
 def get_fyers_client():
     if "fyers_access_token" not in st.session_state:
         raise RuntimeError("not connected yet this session — use the Fyers Connection panel above")
     return get_authenticated_fyers(st.session_state["fyers_client_id"], st.session_state["fyers_access_token"])
+
 
 
 def render_fyers_connection_panel():
@@ -123,11 +157,10 @@ def render_fyers_connection_panel():
                 st.rerun()
             return
 
-        # Try multiple possible secret key names to match what user stored
-        client_id = st.secrets.get("FYERS_CLIENT_ID") or st.secrets.get("client_id", "")
-        secret_key = st.secrets.get("FYERS_SECRET_KEY") or st.secrets.get("app_id") or st.secrets.get("secret_id", "")
-        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI") or st.secrets.get("url_redirect") or st.secrets.get("redirect_uri", "")
-        
+        client_id = get_fyers_secret("FYERS_CLIENT_ID", "client_id", "CLIENT_ID")
+        secret_key = get_fyers_secret("FYERS_SECRET_KEY", "secret_key", "SECRET_KEY", "app_id", "secret_id")
+        redirect_uri = get_fyers_secret("FYERS_REDIRECT_URI", "redirect_uri", "REDIRECT_URI", "url_redirect", "redirect_url")
+
         if not (client_id and secret_key and redirect_uri):
             st.warning("Add FYERS_CLIENT_ID, FYERS_SECRET_KEY, and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
             return
