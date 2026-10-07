@@ -123,9 +123,11 @@ def render_fyers_connection_panel():
                 st.rerun()
             return
 
-        client_id = st.secrets.get("FYERS_CLIENT_ID", "")
-        secret_key = st.secrets.get("FYERS_SECRET_KEY", "")
-        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI", "")
+        # Try multiple possible secret key names to match what user stored
+        client_id = st.secrets.get("FYERS_CLIENT_ID") or st.secrets.get("client_id", "")
+        secret_key = st.secrets.get("FYERS_SECRET_KEY") or st.secrets.get("app_id") or st.secrets.get("secret_id", "")
+        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI") or st.secrets.get("url_redirect") or st.secrets.get("redirect_uri", "")
+        
         if not (client_id and secret_key and redirect_uri):
             st.warning("Add FYERS_CLIENT_ID, FYERS_SECRET_KEY, and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
             return
@@ -527,7 +529,7 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         st.subheader(f"Strategy: {strat_name}")
         status_class = "status-active" if strat["status"] == "Active" else "status-paused"
-        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x | **Rebalance in:** {days_left} Days", unsafe_allow_html=True)
+        st.markdown(f"Status: <span class='{status_class}'>{strat['status']}</span> | **Groups:** {', '.join(strat.get('groups', ['Nifty 500']))} | **Multiplier:** {strat.get('allocation_multiplier', 1.0)}x", unsafe_allow_html=True)
 
         fyers_status = st.session_state.get("_fyers_status")
         if fyers_status == "live":
@@ -882,7 +884,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
     use_pit = st.checkbox(
         "Use point-in-time Nifty 500 membership (970 symbols incl. delisted names, avoids survivorship bias)",
         value=True,
-        help="When on, a stock is only eligible to be ranked/held during the months it was actually a Nifty 500 constituent, using a calendar built from NSE's official log + Wayback Machine snapshots."
+        help="When on, a stock is only eligible to be ranked/held during the months it was actually a Nifty 500 constituent, using a calendar built from NSE's official log + Wayback Machine snaps."
     )
 
     run_bt_btn = st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True)
