@@ -109,36 +109,60 @@ def fetch_market_data(tickers, period="5y"):
 # FYERS - LIVE PRICE OVERLAY
 # ==========================================
 def get_fyers_secret(*keys):
-    seen = set()
+    def normalize(value):
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    candidates = []
     for key in keys:
-        for candidate in (key, key.upper(), key.lower(), key.replace("_", " ").title(), key.replace("_", "")):
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            try:
-                if candidate in st.secrets:
-                    value = st.secrets[candidate]
-                    if value not in (None, ""):
-                        return value
-            except Exception:
-                pass
+        key_str = normalize(key)
+        if not key_str:
+            continue
+        candidates.extend([
+            key_str,
+            key_str.upper(),
+            key_str.lower(),
+            key_str.replace("_", " ").title(),
+            key_str.replace("_", ""),
+            key_str.replace("-", "").lower(),
+        ])
 
-    nested = {}
-    try:
-        nested = st.secrets.get("fyers", {}) or {}
-    except Exception:
-        nested = {}
-    if isinstance(nested, dict):
-        for key in keys:
-            for candidate in (key, key.upper(), key.lower(), key.replace("_", " ").title(), key.replace("_", "")):
-                value = nested.get(candidate)
-                if value not in (None, ""):
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if candidate in st.secrets:
+                value = normalize(st.secrets[candidate])
+                if value:
                     return value
-                for k, v in nested.items():
-                    if isinstance(k, str) and k.lower() == candidate.lower():
-                        return v
-    return ""
+        except Exception:
+            pass
 
+    try:
+        secret_sections = [
+            st.secrets.get("fyers"),
+            st.secrets.get("FYERS"),
+            st.secrets.get("broker"),
+            st.secrets.get("BROKER"),
+        ]
+        for section in secret_sections:
+            if not isinstance(section, dict):
+                continue
+            for key, value in section.items():
+                key_str = normalize(key)
+                if not key_str:
+                    continue
+                if key_str.lower() in {c.lower() for c in candidates}:
+                    val = normalize(value)
+                    if val:
+                        return val
+    except Exception:
+        pass
+
+    return ""
 
 
 def get_fyers_client():
