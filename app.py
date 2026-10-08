@@ -123,29 +123,28 @@ def render_fyers_connection_panel():
                 st.rerun()
             return
 
-        # Read secrets with the exact names you use in Streamlit
-        client_id = st.secrets.get("FYERS_CLIENT_ID", "")
-        app_id = st.secrets.get("FYERS_APP_ID", "")
-        secret_id = st.secrets.get("FYERS_SECRET_ID", "")
-        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI", "")
+        # Read only FYERS_APP_ID (with -200 suffix) and other required secrets
+        app_id = st.secrets.get("FYERS_APP_ID", "").strip()
+        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI", "").strip()
         
-        # Use app_id or secret_id as the secret_key for FYERS API
-        secret_key = app_id or secret_id
+        # Use app_id as the secret_key for FYERS API
+        secret_key = app_id
 
-        if not (client_id and secret_key and redirect_uri):
-            st.warning("Add FYERS_CLIENT_ID, FYERS_APP_ID, FYERS_SECRET_ID, and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
+        if not (app_id and redirect_uri):
+            st.warning("Add FYERS_APP_ID (with -200 suffix) and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
             return
 
         try:
-            login_url = get_login_url(client_id, secret_key, redirect_uri).generate_authcode()
+            # Use app_id as client_id as well for Fyers API v3
+            login_url = get_login_url(app_id, secret_key, redirect_uri).generate_authcode()
             st.markdown(f"1. [Click here to log into Fyers]({login_url})")
             st.caption("2. After logging in, copy the FULL address bar contents you land on.")
             pasted = st.text_input("3. Paste that URL (or just the auth code) here:")
             if st.button("Connect") and pasted:
                 auth_code = extract_auth_code(pasted)
-                token = exchange_code_for_token(client_id, secret_key, redirect_uri, auth_code)
+                token = exchange_code_for_token(app_id, secret_key, redirect_uri, auth_code)
                 st.session_state["fyers_access_token"] = token
-                st.session_state["fyers_client_id"] = client_id
+                st.session_state["fyers_client_id"] = app_id
                 st.success("Connected!")
                 st.rerun()
         except FyersLoginError as e:
@@ -888,7 +887,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
     use_pit = st.checkbox(
         "Use point-in-time Nifty 500 membership (970 symbols incl. delisted names, avoids survivorship bias)",
         value=True,
-        help="When on, a stock is only eligible to be ranked/held during the months it was actually a Nifty 500 constituent, using a calendar built from NSE's official log + Wayback Machine snaps."
+        help="When on, a stock is only eligible to be ranked/held during the months it was actually a Nifty 500 constituent, using a calendar built from NSE's official log + Wayback Machine snapshots."
     )
 
     run_bt_btn = st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True)
