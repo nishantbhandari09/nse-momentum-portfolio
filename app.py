@@ -899,7 +899,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         "Uploaded ETF groups",
         options=ETF_GROUP_NAMES,
         default=[g for g in ETF_GROUP_NAMES if g in existing_groups],
-        key="strategy_uploaded_etf_groups",
+        key=f"strategy_uploaded_etf_groups_{st.session_state.editing_strategy_name or 'new'}",
     )
 
     st.markdown("---")
