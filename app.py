@@ -706,51 +706,22 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             momentum_data.load_all_archive_symbols()
             + get_trusted_tickers_by_group(selected_groups)
         ))
-        # Prefer locally stored, dated Nifty 200/500 constituent snapshots from
-        # 2013 onward. Use the legacy PIT calendar only before those snapshots begin,
-        # preserving earlier/delisted names without letting the broader Nifty 500
-        # membership leak into later Nifty 200 periods.
+        # Prefer the committed reconstructed Nifty 500 membership intervals. The
+        # public interval source does not provide an exact Nifty 200 series, so
+        # Nifty 200 backtests currently use the broader Nifty 500 calendar as a
+        # proxy. The app keeps this limitation explicit rather than inventing
+        # an exact historical Nifty 200 membership list.
         membership_target = "Nifty 500" if "Nifty 500" in selected_groups else "Nifty 200"
-        snapshot_membership = index_history_data.get_membership_calendar(membership_target)
-        membership_frames = []
+        membership_calendar = index_history_data.get_membership_calendar(membership_target)
 
-        try:
-            legacy_membership = momentum_data.load_membership_calendar()
-        except Exception:
-            legacy_membership = pd.DataFrame(columns=["symbol", "start", "end"])
+        if membership_calendar.empty:
+            try:
+                legacy_membership = momentum_data.load_membership_calendar()
+                if legacy_membership is not None and not legacy_membership.empty:
+                    membership_calendar = legacy_membership[["symbol", "start", "end"]].copy()
+            except Exception:
+                pass
 
-        if not snapshot_membership.empty:
-            cutoff = pd.to_datetime(snapshot_membership["start"], errors="coerce").min()
-            if legacy_membership is not None and not legacy_membership.empty and pd.notna(cutoff):
-                legacy_prefix = legacy_membership[["symbol", "start", "end"]].copy()
-                legacy_prefix["start"] = pd.to_datetime(legacy_prefix["start"], errors="coerce")
-                legacy_prefix["end"] = pd.to_datetime(legacy_prefix["end"], errors="coerce")
-                cutoff_previous_day = cutoff - pd.Timedelta(days=1)
-                legacy_prefix = legacy_prefix[
-                    legacy_prefix["start"].notna() & (legacy_prefix["start"] < cutoff)
-                ].copy()
-                legacy_prefix["end"] = legacy_prefix["end"].fillna(cutoff_previous_day)
-                legacy_prefix.loc[
-                    legacy_prefix["end"] > cutoff_previous_day, "end"
-                ] = cutoff_previous_day
-                legacy_prefix = legacy_prefix[
-                    legacy_prefix["end"].notna()
-                    & (legacy_prefix["end"] >= legacy_prefix["start"])
-                ]
-                if not legacy_prefix.empty:
-                    membership_frames.append(legacy_prefix)
-
-            membership_frames.append(snapshot_membership)
-        elif legacy_membership is not None and not legacy_membership.empty:
-            # Fallback if the checked-in snapshots are unavailable. For Nifty 200
-            # this uses the broader Nifty 500 calendar, so it is explicitly only
-            # an approximation rather than exact historical Nifty 200 membership.
-            membership_frames.append(legacy_membership[["symbol", "start", "end"]])
-
-        membership_calendar = (
-            pd.concat(membership_frames, ignore_index=True).drop_duplicates()
-            if membership_frames else pd.DataFrame(columns=["symbol", "start", "end"])
-        )
         # Request price history for all historical members as well as the
         # 970-symbol archive and current index constituents. This enables
         # members that later exited the index to be considered on earlier dates.
