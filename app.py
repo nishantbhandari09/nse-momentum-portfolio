@@ -485,17 +485,31 @@ def _market_trend_is_bullish(strat, as_of_date=None):
 def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
 
+    use_relative_momentum = bool(strat.get("use_relative_momentum_filter", False))
+    relative_index_name = strat.get("relative_momentum_index", "Nifty 50")
+    relative_index_ticker = MAJOR_MARKET_INDICES.get(relative_index_name, "^NSEI")
+
     if price_subset is None:
         group_tickers = get_trusted_tickers_by_group(selected_groups)
-        prices_df = fetch_market_data(group_tickers, period="2y")
+        fetch_tickers = list(group_tickers)
+        if use_relative_momentum and relative_index_ticker not in fetch_tickers:
+            fetch_tickers.append(relative_index_ticker)
+        prices_df = fetch_market_data(fetch_tickers, period="2y")
+        candidate_tickers = set(group_tickers)
     else:
         prices_df = price_subset
+        candidate_tickers = None
 
     if prices_df.empty:
         return []
 
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
+
+    # For a live scan, use only the selected main group as the stock universe.
+    # The benchmark is fetched separately and must never be ranked as a stock.
+    if use_relative_momentum and candidate_tickers is not None:
+        filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in candidate_tickers]]
 
     trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
@@ -504,6 +518,39 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         if strat.get("market_trend_exit_on_bearish", True):
             current_holdings = []
         return []
+
+    if use_relative_momentum:
+        if relative_index_ticker not in prices_df.columns:
+            # Fail closed: don't silently admit stocks if benchmark history is missing.
+            return []
+        benchmark = prices_df[relative_index_ticker].dropna()
+        if as_of_date is not None:
+            benchmark = benchmark.loc[:pd.Timestamp(as_of_date)]
+        if benchmark.empty:
+            return []
+
+        # RS is the stock's price divided by the selected index level. Scaling
+        # the ratio by 100 makes it easier to read but doesn't change the MA test.
+        candidate_cols = [
+            c for c in filtered_df.columns
+            if c != relative_index_ticker and not c.startswith("^")
+        ]
+        candidate_prices = prices_df.reindex(columns=candidate_cols)
+        aligned_benchmark = benchmark.reindex(candidate_prices.index).ffill()
+        rs_ratio = candidate_prices.div(aligned_benchmark.replace(0, np.nan), axis=0) * 100.0
+        rs_type = strat.get("relative_momentum_ma_type", "SMA")
+        rs_period = max(2, int(strat.get("relative_momentum_ma_period", 200)))
+        if rs_type == "EMA":
+            rs_average = rs_ratio.ewm(span=rs_period, adjust=False, min_periods=rs_period).mean()
+        else:
+            rs_average = rs_ratio.rolling(window=rs_period, min_periods=rs_period).mean()
+
+        current_rs = rs_ratio.iloc[-1]
+        current_rs_average = rs_average.iloc[-1]
+        passes_rs = (current_rs > current_rs_average) & current_rs.notna() & current_rs_average.notna()
+        filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in passes_rs.index and bool(passes_rs.get(c, False))]]
+        if filtered_df.empty:
+            return []
 
     ma_config = strat.get("moving_average", "200 EMA")
     if ma_config != "None":
@@ -596,6 +643,13 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         # membership calendar.
         tickers = get_trusted_tickers_by_group(selected_groups)
         membership_calendar = None
+
+    if strat_config.get("use_relative_momentum_filter", False):
+        relative_index_ticker = MAJOR_MARKET_INDICES.get(
+            strat_config.get("relative_momentum_index", "Nifty 50"), "^NSEI"
+        )
+        if relative_index_ticker not in tickers:
+            tickers.append(relative_index_ticker)
 
     prices_df = fetch_market_data(tickers, period="5y")
     prices_df = prices_df.loc[start_date:end_date]
@@ -1033,6 +1087,40 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         use_rs = st.checkbox("Enable Relative Strength Ratio Filter", value=edit_strat.get("use_rs", True))
         rs_benchmark = st.selectbox("RS Benchmark Ratio :", ["Nifty 500 / G-Sec", "Nifty 50 / Liquid ETF"])
 
+    st.markdown("#### Optional Relative Momentum Filter")
+    use_relative_momentum = st.checkbox(
+        "Enable Relative Momentum Filter",
+        value=bool(edit_strat.get("use_relative_momentum_filter", False)),
+        help="Compare each selected stock's price/index ratio against its own moving average. Only stocks with RS above the selected average remain eligible."
+    )
+    relative_index_options = list(MAJOR_MARKET_INDICES.keys())
+    relative_index_saved = edit_strat.get("relative_momentum_index", "Nifty 50")
+    relative_momentum_index = st.selectbox(
+        "Relative Momentum Benchmark Index (Denominator)",
+        relative_index_options,
+        index=relative_index_options.index(relative_index_saved) if relative_index_saved in relative_index_options else 0,
+        disabled=not use_relative_momentum,
+        key="relative_momentum_index_select",
+    )
+    relative_ma_options = ["SMA", "EMA"]
+    relative_ma_saved = edit_strat.get("relative_momentum_ma_type", "SMA")
+    relative_momentum_ma_type = st.selectbox(
+        "Relative Strength Indicator",
+        relative_ma_options,
+        index=relative_ma_options.index(relative_ma_saved) if relative_ma_saved in relative_ma_options else 0,
+        disabled=not use_relative_momentum,
+        key="relative_momentum_ma_type_select",
+    )
+    relative_momentum_ma_period = st.number_input(
+        "Relative Strength MA Period (Days)",
+        min_value=2,
+        max_value=500,
+        value=int(edit_strat.get("relative_momentum_ma_period", 200)),
+        step=1,
+        disabled=not use_relative_momentum,
+        key="relative_momentum_ma_period_input",
+    )
+
     st.markdown("#### Optional Market Trend Filter")
     use_market_trend = st.checkbox(
         "Enable Market Trend Filter",
@@ -1142,6 +1230,10 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "use_rs": use_rs,
             "rs_benchmark": rs_benchmark,
             "min_price": float(min_price),
+            "use_relative_momentum_filter": bool(use_relative_momentum),
+            "relative_momentum_index": relative_momentum_index,
+            "relative_momentum_ma_type": relative_momentum_ma_type,
+            "relative_momentum_ma_period": int(relative_momentum_ma_period),
             "use_market_trend_filter": bool(use_market_trend),
             "market_trend_index": trend_index,
             "market_trend_indicator": trend_indicator,
