@@ -996,7 +996,7 @@ elif st.session_state.navigation_tab == "INDEX_CONSTITUENTS":
         selected_index = st.selectbox(
             "Select Index",
             options=list(INDEX_CATEGORIES[index_category].keys()),
-            key="constituent_index_selector",
+            key=f"constituent_index_selector_{index_category}",
         )
     with action_col:
         st.write("")
