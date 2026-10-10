@@ -1411,10 +1411,18 @@ elif st.session_state.navigation_tab == "BACKTEST":
         end_d = st.date_input("End Date :", value=datetime.now())
 
     use_pit = st.checkbox(
-        "Use point-in-time Nifty 500 membership (970 symbols incl. delisted names, avoids survivorship bias)",
+        "Use point-in-time index membership for backtesting",
         value=True,
-        help="When on, a stock is only eligible to be ranked/held during the months it was actually a Nifty 500 constituent, using a calendar built from NSE's official log + Wayback Machine snapshots."
+        help="Historical eligibility is reconstructed from published index changes. This reduces survivorship bias but does not eliminate every data gap."
     )
+    if use_pit and any(group in bt_strat_config.get("groups", []) for group in ("Nifty 500", "Nifty 200")):
+        st.caption(
+            "Data quality note: daily OHLC history for major Nifty indices is stored in this repository. "
+            "Historical constituent membership is reconstructed, not a certified daily official ledger; "
+            "coverage/cardinality gaps are more likely before 2018. Exact historical Nifty 200 membership "
+            "is not available in the stored source, so a Nifty 200 backtest uses a broader Nifty 500 "
+            "membership proxy and displays a warning."
+        )
 
     run_bt_btn = st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True)
 
