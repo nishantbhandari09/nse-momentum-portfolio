@@ -109,7 +109,9 @@ def _normalise_constituent_csv(csv_text: str) -> pd.DataFrame:
         source_col = column_lookup.get(normalised)
         result[display_name] = candidate[source_col].astype(str).str.strip() if source_col else ""
 
-    result["Symbol"] = result["Symbol"].replace({"nan": "", "None": ""}).str.strip()
+    for column in result.columns:
+        result[column] = result[column].replace({"nan": "", "None": ""}).str.strip()
+
     result = result[result["Symbol"].ne("") & result["Symbol"].ne("-")]
     result = result.drop_duplicates(subset=["Symbol"]).reset_index(drop=True)
 
@@ -129,7 +131,6 @@ def fetch_index_constituents(category: str, index_name: str):
         raise ValueError("Please select a supported index.")
 
     filename = INDEX_CATEGORIES[category][index_name]
-    errors = []
 
     for base_url in SOURCE_BASES:
         url = base_url + filename
@@ -139,9 +140,9 @@ def fetch_index_constituents(category: str, index_name: str):
             csv_text = response.content.decode("utf-8-sig", errors="replace")
             constituents = _normalise_constituent_csv(csv_text)
             return constituents, url
-        except Exception as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            errors.append(f"{base_url} ({status or type(exc).__name__})")
+        except Exception:
+            # Continue to the next official mirror if this endpoint is unavailable.
+            continue
 
     raise RuntimeError(
         f"Couldn't download the published constituent file for {index_name}. "
