@@ -6,6 +6,7 @@ data/INDEX_DATA_SOURCES.md. Membership history is reconstructed and has coverage
 limitations, especially before 2018; it is not an official complete historical file.
 """
 from pathlib import Path
+from io import StringIO
 
 import pandas as pd
 import requests
@@ -127,7 +128,7 @@ def load_membership_history():
         try:
             response = requests.get(MEMBERSHIP_URL, timeout=30)
             response.raise_for_status()
-            frame = pd.read_csv(pd.io.common.StringIO(response.text), dtype={"symbol": str, "index_name": str})
+            frame = pd.read_csv(StringIO(response.text), dtype={"symbol": str, "index_name": str})
         except Exception:
             return pd.DataFrame(
                 columns=["index_id", "index_name", "symbol", "valid_from", "valid_to"]
