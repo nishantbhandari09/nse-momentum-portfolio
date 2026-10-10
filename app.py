@@ -146,9 +146,21 @@ def get_selected_etf_tickers(groups):
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y", full_history=False):
-    defensive_and_regime = list(set(ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
+    # Load durable index history first. When a stored series exists, do not
+    # repeatedly download that same index from Yahoo on every scanner/backtest run.
+    try:
+        stored_index_prices = index_history_data.load_index_close_prices()
+    except Exception:
+        stored_index_prices = pd.DataFrame()
+
+    stored_index_tickers = set(stored_index_prices.columns) if not stored_index_prices.empty else set()
+    requested_tickers = [t for t in tickers if t not in stored_index_tickers]
+    defensive_and_regime = list(set(
+        t for t in ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
+        if t not in stored_index_tickers
+    ))
     archive_based = momentum_data.get_prices_with_live_topup(
-        tickers,
+        requested_tickers,
         extra_tickers=defensive_and_regime,
         missing_period="max" if full_history else "5y",
     )
@@ -156,33 +168,30 @@ def fetch_market_data(tickers, period="5y", full_history=False):
     if not archive_based.empty:
         prices = archive_based
     else:
-        all_tickers = list(set(tickers + defensive_and_regime))
-        data = yf.download(
-            tickers=all_tickers,
-            period="max" if full_history else period,
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-        )
-        if isinstance(data.columns, pd.MultiIndex):
-            prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
-        else:
-            prices = data
-
-    # Prefer the repository-stored official Nifty index close series over
-    # vendor fallback values. These CSVs persist in GitHub and are updated daily.
-    try:
-        stored_index_prices = index_history_data.load_index_close_prices()
-        if not stored_index_prices.empty:
-            if prices is None or prices.empty:
-                prices = stored_index_prices
+        all_tickers = list(set(requested_tickers + defensive_and_regime))
+        if all_tickers:
+            data = yf.download(
+                tickers=all_tickers,
+                period="max" if full_history else period,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+            )
+            if isinstance(data.columns, pd.MultiIndex):
+                prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
             else:
-                prices = prices.combine_first(stored_index_prices)
-                prices.update(stored_index_prices)
-    except Exception:
-        # Historical index files may not have been seeded yet; retain the
-        # existing archive/Yahoo fallback rather than blocking the app.
-        pass
+                prices = data
+        else:
+            prices = pd.DataFrame()
+
+    # Use the checked-in official Nifty index close series. These CSVs persist
+    # in GitHub and are updated daily by the repository workflow.
+    if not stored_index_prices.empty:
+        if prices is None or prices.empty:
+            prices = stored_index_prices
+        else:
+            prices = prices.combine_first(stored_index_prices)
+            prices.update(stored_index_prices)
 
     # Keep ETFs with shorter available histories; never backfill future prices.
     prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index().ffill()
