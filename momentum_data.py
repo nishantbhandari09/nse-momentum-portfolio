@@ -151,46 +151,113 @@ def load_all_archive_symbols() -> list:
     return list(load_archive_prices("Close").columns)
 
 
+def _extract_yahoo_close_frame(data, tickers):
+    """Extract close prices robustly from yfinance's single/multi-ticker output."""
+    if data is None or data.empty:
+        return pd.DataFrame()
+
+    tickers = list(dict.fromkeys(tickers))
+    if isinstance(data.columns, pd.MultiIndex):
+        result = {}
+        level0 = set(data.columns.get_level_values(0))
+        level1 = set(data.columns.get_level_values(1))
+        if "Close" in level1:
+            for ticker in tickers:
+                if ticker in level0 and "Close" in data[ticker].columns:
+                    result[ticker] = data[ticker]["Close"]
+        elif "Close" in level0:
+            close_data = data["Close"]
+            for ticker in tickers:
+                if ticker in close_data.columns:
+                    result[ticker] = close_data[ticker]
+        return pd.DataFrame(result, index=data.index)
+
+    if "Close" in data.columns and len(tickers) == 1:
+        return data[["Close"]].rename(columns={"Close": tickers[0]})
+    if "Close" in data.columns and not tickers:
+        return pd.DataFrame(index=data.index)
+    return pd.DataFrame()
+
+
+def _download_yahoo_close(tickers, period="5y", start=None, chunk_size=60):
+    """Fetch close history in moderate batches so large ETF universes are manageable."""
+    tickers = list(dict.fromkeys(ticker for ticker in tickers if ticker))
+    if not tickers:
+        return pd.DataFrame()
+
+    import yfinance as yf
+
+    frames = []
+    for offset in range(0, len(tickers), chunk_size):
+        batch = tickers[offset:offset + chunk_size]
+        try:
+            kwargs = {
+                "tickers": batch,
+                "interval": "1d",
+                "auto_adjust": True,
+                "progress": False,
+                "group_by": "ticker",
+                "threads": True,
+            }
+            if start is None:
+                kwargs["period"] = period
+            else:
+                kwargs["start"] = start
+            downloaded = yf.download(**kwargs)
+            close_frame = _extract_yahoo_close_frame(downloaded, batch)
+            if not close_frame.empty:
+                frames.append(close_frame)
+        except Exception:
+            # A bad/renamed symbol should not prevent other symbols from loading.
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+    result = pd.concat(frames, axis=1)
+    result = result.loc[:, ~result.columns.duplicated()]
+    return result.sort_index()
+
+
 def get_prices_with_live_topup(tickers, extra_tickers=None) -> pd.DataFrame:
-    """Archive history for `tickers`, topped up with a small incremental
-    Yahoo Finance fetch for whatever's happened since the archive's last
-    date, so momentum rankings reflect current prices even though the bulk
-    history is a periodic snapshot. `extra_tickers` (e.g. regime/defensive
-    tickers not in the archive at all, like '^CRSLDX') are fetched live-only
-    and merged in. Falls back to archive-only data if the top-up fetch fails
-    -- a stale-by-a-few-days ranking beats a crashed page."""
+    """Load archive history, fetch full history for missing symbols, and refresh stale prices.
+
+    ETFs often don't exist in the stock archive. They still need a multi-year
+    history for momentum ranking and backtesting, not just a five-day price top-up.
+    """
     archive = load_archive_prices("Close")
     if archive.empty:
         return pd.DataFrame()
 
-    cols = [t for t in tickers if t in archive.columns]
-    relevant = archive[cols]
-    last_archive_date = relevant.index.max()
+    requested = list(dict.fromkeys(ticker for ticker in tickers if ticker))
+    extras = list(dict.fromkeys(ticker for ticker in (extra_tickers or []) if ticker))
+    archived_cols = [ticker for ticker in requested if ticker in archive.columns]
+    relevant = archive[archived_cols].copy()
+    last_archive_date = archive.index.max()
+    if pd.isna(last_archive_date):
+        return relevant
+
+    missing_symbols = list(dict.fromkeys(
+        [ticker for ticker in requested + extras if ticker not in archive.columns]
+    ))
+
+    # Download full history for selected ETFs and other non-archive symbols.
+    missing_history = _download_yahoo_close(missing_symbols, period="5y")
+
+    # Incremental updates are only needed for symbols already covered by archive.
     gap_days = (pd.Timestamp.today().normalize() - last_archive_date).days
-
-    fetch_list = list(dict.fromkeys(cols + list(extra_tickers or [])))
-    needs_topup = gap_days > 1 or extra_tickers
-
-    if not needs_topup:
-        return relevant
-
-    try:
-        import yfinance as yf
-        topup = yf.download(
-            tickers=fetch_list,
+    incremental = pd.DataFrame()
+    if gap_days > 1 and archived_cols:
+        incremental = _download_yahoo_close(
+            archived_cols,
             start=(last_archive_date - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
-            interval="1d", auto_adjust=True, progress=False, group_by="ticker", threads=True,
         )
-        if isinstance(topup.columns, pd.MultiIndex):
-            topup_close = pd.DataFrame({t: topup[t]["Close"] for t in fetch_list if t in topup.columns.get_level_values(0)})
-        else:
-            topup_close = topup[["Close"]].rename(columns={"Close": fetch_list[0]})
 
-        combined = relevant.combine_first(topup_close)
-        combined.update(topup_close)
-        for extra in (extra_tickers or []):
-            if extra in topup_close.columns and extra not in combined.columns:
-                combined[extra] = topup_close[extra]
-        return combined.sort_index()
-    except Exception:
-        return relevant
+    combined = relevant
+    if not missing_history.empty:
+        combined = combined.combine_first(missing_history)
+        combined.update(missing_history)
+    if not incremental.empty:
+        combined = combined.combine_first(incremental)
+        combined.update(incremental)
+
+    return combined.sort_index()
