@@ -17,6 +17,7 @@ from fyers_auth import (
 )
 import momentum_data
 from etf_index_universe import fetch_etf_and_index_universe
+from index_constituents import INDEX_CATEGORIES, fetch_index_constituents
 
 # ==========================================
 # PAGE CONFIGURATION & STYLING
@@ -502,7 +503,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
-nav_col1, nav_col2, nav_col3, _ = st.columns([1.5, 2, 1.5, 3])
+nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1.2, 1.8, 1.3, 2.0])
 with nav_col1:
     if st.button("💻 DASHBOARD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DASHBOARD" else "secondary"):
         st.session_state.navigation_tab = "DASHBOARD"
@@ -518,6 +519,12 @@ with nav_col2:
 with nav_col3:
     if st.button("📈 BACKTEST ENGINE", use_container_width=True, type="primary" if st.session_state.navigation_tab == "BACKTEST" else "secondary"):
         st.session_state.navigation_tab = "BACKTEST"
+        st.rerun()
+
+with nav_col4:
+    if st.button("🧾 INDEX CONSTITUENTS", use_container_width=True, type="primary" if st.session_state.navigation_tab == "INDEX_CONSTITUENTS" else "secondary"):
+        st.session_state.navigation_tab = "INDEX_CONSTITUENTS"
+        st.session_state.active_strategy_view = None
         st.rerun()
 
 st.markdown("---")
@@ -966,3 +973,96 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 st.dataframe(bt_results, use_container_width=True)
             else:
                 st.error("Insufficient market data for the selected timeframe. Try selecting a broader timeframe.")
+
+
+# ==========================================
+# PAGE 4: INDEX CONSTITUENTS
+# ==========================================
+elif st.session_state.navigation_tab == "INDEX_CONSTITUENTS":
+    st.title("🧾 INDEX CONSTITUENTS")
+    st.caption(
+        "Choose an index to see its published constituent companies. "
+        "This section is separate from the strategy scanner and backtesting engine."
+    )
+
+    selector_col1, selector_col2, action_col = st.columns([1, 1.5, 1])
+    with selector_col1:
+        index_category = st.selectbox(
+            "Index Category",
+            options=list(INDEX_CATEGORIES.keys()),
+            key="constituent_index_category",
+        )
+    with selector_col2:
+        selected_index = st.selectbox(
+            "Select Index",
+            options=list(INDEX_CATEGORIES[index_category].keys()),
+            key="constituent_index_selector",
+        )
+    with action_col:
+        st.write("")
+        st.write("")
+        if st.button("🔄 Refresh Constituents", use_container_width=True):
+            fetch_index_constituents.clear()
+            st.rerun()
+
+    st.caption(
+        "Constituents are read from published Nifty Indices/NSE CSV files and cached "
+        "for up to 6 hours. You do not need to connect FYERS to view this list."
+    )
+
+    try:
+        with st.spinner(f"Loading {selected_index} constituents..."):
+            all_constituents, source_url = fetch_index_constituents(
+                index_category, selected_index
+            )
+    except Exception as exc:
+        st.error(str(exc))
+    else:
+        industry_count = all_constituents["Industry"].replace("", pd.NA).nunique()
+        search_query = st.text_input(
+            "Search constituents",
+            placeholder="Type a company name, symbol, industry or ISIN...",
+            key="constituent_search_query",
+        )
+
+        visible_constituents = all_constituents.copy()
+        if search_query.strip():
+            search_mask = (
+                visible_constituents.fillna("")
+                .astype(str)
+                .apply(
+                    lambda column: column.str.contains(
+                        search_query.strip(), case=False, regex=False
+                    )
+                )
+                .any(axis=1)
+            )
+            visible_constituents = visible_constituents.loc[search_mask]
+
+        metric1, metric2, metric3 = st.columns(3)
+        metric1.metric("Total Constituents", f"{len(all_constituents):,}")
+        metric2.metric("Matching Search", f"{len(visible_constituents):,}")
+        metric3.metric("Industries Represented", f"{industry_count:,}")
+
+        st.markdown(f"#### {selected_index} — Constituent List")
+        st.dataframe(
+            visible_constituents,
+            use_container_width=True,
+            hide_index=True,
+            height=600,
+        )
+
+        safe_index_name = (
+            selected_index.lower()
+            .replace("&", "and")
+            .replace(" ", "_")
+            .replace("/", "_")
+        )
+        st.download_button(
+            "📥 Download visible constituents (CSV)",
+            data=visible_constituents.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"{safe_index_name}_constituents.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        st.markdown(f"Source: [Official constituent CSV]({source_url})")
