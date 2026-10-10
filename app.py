@@ -645,6 +645,15 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                         if qty > 0:
                             current_holdings[sym] = qty
                             current_cash -= (qty * stk_price)
+        elif (
+            strat_config.get("use_market_trend_filter", False)
+            and strat_config.get("market_trend_exit_on_bearish", True)
+            and not _market_trend_is_bullish(strat_config, as_of_date=dt)
+        ):
+            # Sell all holdings into cash at this rebalance when the chosen
+            # index trend is bearish; the next bullish rebalance may re-enter.
+            current_holdings = {}
+            current_cash = total_val
 
         portfolio_history.append({"Date": dt, "Portfolio Value": total_val})
 
