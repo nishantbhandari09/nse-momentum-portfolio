@@ -7,6 +7,11 @@ import requests
 import streamlit as st
 
 
+ETF_SYMBOL_MASTER_URL = "https://public.fyers.in/sym_details/NSE_CM.csv"
+ALL_ETF_CATEGORY = "ALL ETF"
+ALL_ETF_OPTION = "ALL ETF & BEES"
+ALL_ETF_SENTINEL = "__ALL_ETF_BEES__"
+
 # Official downloadable constituent CSVs. Broad-market and sectoral groups are
 # kept separate so the app's selector stays easy to navigate.
 INDEX_CATEGORIES = {
@@ -54,11 +59,6 @@ INDEX_CATEGORIES = {
 
 # The ETF category uses the current public NSE cash-market symbol master.
 INDEX_CATEGORIES[ALL_ETF_CATEGORY] = {ALL_ETF_OPTION: ALL_ETF_SENTINEL}
-
-ETF_SYMBOL_MASTER_URL = "https://public.fyers.in/sym_details/NSE_CM.csv"
-ALL_ETF_CATEGORY = "ALL ETF"
-ALL_ETF_OPTION = "ALL ETF & BEES"
-ALL_ETF_SENTINEL = "__ALL_ETF_BEES__"
 
 SOURCE_BASES = (
     "https://www.niftyindices.com/IndexConstituent/",
