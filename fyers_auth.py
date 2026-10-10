@@ -1,87 +1,152 @@
+"""FYERS API v3 OAuth helpers for a Streamlit app.
+
+The user only clicks the FYERS login link. The redirect returns an auth_code to
+Streamlit, and the app exchanges it automatically; the user never copies/pastes it.
 """
-Fyers API v3 login.
+from __future__ import annotations
 
-I haven't been able to verify this against a real Fyers account (no
-credentials, no network access from where I write this) -- it's built
-directly from Fyers' official SDK documentation and usage examples, not
-guessed. Treat the first run as a test, same as kite_auth.py originally was.
-
-This is a MANUAL login (you open a link, log in, paste back a code) rather
-than automated like the Kite module. Reason: for Kite I found a well-
-documented community pattern for automating the login; for Fyers I haven't
-verified one exists or still works, and I'd rather give you something that
-definitely works manually than something that might silently fail trying
-to be clever. Automating this is a separate follow-up if you want it, once
-we've confirmed the manual flow works end to end.
-
-Setup (one-time), before any of this will work:
-1. Go to https://myapi.fyers.in/dashboard/ and create an app.
-2. You'll get a `client_id` (looks like "ABCDE1234F-100") and a `secret_key`.
-3. Set a redirect_uri -- for a Streamlit app, your app's own URL works.
-4. pip install fyers-apiv3
-
-Requires: pip install fyers-apiv3
-"""
+import hashlib
+import hmac
+import secrets
+import time
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import requests
 from fyers_apiv3 import fyersModel
+
+AUTH_BASE = "https://api-t1.fyers.in/api/v3"
 
 
 class FyersLoginError(RuntimeError):
-    """Raised when the login/token exchange doesn't complete as expected."""
+    """Raised when FYERS authentication does not complete."""
 
 
-def get_login_url(client_id: str, secret_key: str, redirect_uri: str, state: str = "momentum_app") -> fyersModel.SessionModel:
-    """Returns a configured SessionModel; call .generate_authcode() on it for
-    the URL to send the user to."""
+def get_login_url(
+    client_id: str,
+    secret_key: str,
+    redirect_uri: str,
+    state: str = "momentum_app",
+) -> fyersModel.SessionModel:
+    """Return a configured official SDK SessionModel for the login URL."""
     return fyersModel.SessionModel(
-        client_id=client_id,
-        secret_key=secret_key,
-        redirect_uri=redirect_uri,
+        client_id=client_id.strip(),
+        secret_key=secret_key.strip(),
+        redirect_uri=redirect_uri.strip(),
         response_type="code",
         state=state,
         grant_type="authorization_code",
     )
 
 
+def create_signed_state(secret_key: str) -> str:
+    """Create a self-contained, time-limited OAuth state value.
+
+    It does not rely on Streamlit session_state surviving the round-trip through
+    the external FYERS login page.
+    """
+    issued = str(int(time.time()))
+    nonce = secrets.token_urlsafe(18)
+    payload = f"v1.{issued}.{nonce}"
+    signature = hmac.new(
+        secret_key.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+def validate_signed_state(state: str, secret_key: str, max_age_seconds: int = 1800) -> bool:
+    """Validate the signed OAuth state and reject expired or tampered callbacks."""
+    try:
+        version, issued_text, nonce, signature = str(state).split(".", 3)
+        if version != "v1" or not nonce:
+            return False
+        issued = int(issued_text)
+        age = int(time.time()) - issued
+        if age < -60 or age > max_age_seconds:
+            return False
+        payload = f"{version}.{issued_text}.{nonce}"
+        expected = hmac.new(
+            secret_key.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(signature, expected)
+    except (ValueError, TypeError):
+        return False
+
+
 def extract_auth_code(redirected_url: str) -> str:
-    """After logging in, Fyers sends the browser to your redirect_uri with
-    '?s=ok&code=...&auth_code=...' (or similar) attached. Paste that whole
-    URL here (or just the auth_code value itself -- both work)."""
-    if "auth_code=" not in redirected_url and "code=" not in redirected_url:
-        return redirected_url.strip()  # assume they pasted the bare code
-    parsed = parse_qs(urlparse(redirected_url).query)
+    """Read the code from a callback URL or accept a raw code for compatibility."""
+    value = str(redirected_url or "").strip()
+    if "auth_code=" not in value and "code=" not in value:
+        return value
+    parsed = parse_qs(urlparse(value).query)
     code = (parsed.get("auth_code") or parsed.get("code") or [None])[0]
     if not code:
-        raise FyersLoginError(
-            "Couldn't find an auth code in that URL. Paste the FULL address bar "
-            "contents right after logging in, including everything after the '?'."
+        raise FyersLoginError("FYERS redirected back without an auth_code.")
+    return str(code).strip()
+
+
+def exchange_code_for_token(
+    client_id: str,
+    secret_key: str,
+    redirect_uri: str,
+    auth_code: str,
+) -> str:
+    """Exchange the one-time OAuth code using FYERS' documented v3 REST contract.
+
+    This intentionally avoids SDK response.json() assumptions so empty/non-JSON
+    broker responses become useful error messages instead of JSONDecodeErrors.
+    """
+    client_id = str(client_id).strip()
+    secret_key = str(secret_key).strip()
+    redirect_uri = str(redirect_uri).strip()
+    auth_code = extract_auth_code(auth_code)
+
+    if not client_id or not secret_key or not redirect_uri:
+        raise FyersLoginError("FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI are required.")
+    if not auth_code:
+        raise FyersLoginError("FYERS did not return an authorization code.")
+
+    app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode("utf-8")).hexdigest()
+    payload = {
+        "grant_type": "authorization_code",
+        "appIdHash": app_hash,
+        "code": auth_code,
+    }
+    try:
+        response = requests.post(
+            f"{AUTH_BASE}/validate-authcode",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
         )
-    return code
+    except requests.RequestException as exc:
+        raise FyersLoginError(f"Could not reach FYERS token endpoint: {exc}") from exc
 
+    body = (response.text or "").strip()
+    try:
+        data: dict[str, Any] = response.json() if body else {}
+    except ValueError:
+        data = {}
 
-def exchange_code_for_token(client_id: str, secret_key: str, redirect_uri: str, auth_code: str) -> str:
-    """Trades a one-time auth_code for an access_token. Call this right after
-    extract_auth_code() -- the code is single-use and short-lived."""
-    session = get_login_url(client_id, secret_key, redirect_uri)
-    session.set_token(auth_code)
-    response = session.generate_token()
-    access_token = response.get("access_token")
-    if not access_token:
-        raise FyersLoginError(f"Token exchange failed: {response}")
-    return access_token
+    if response.status_code >= 400 or not data.get("access_token"):
+        detail = body[:1200] if body else "empty response body"
+        raise FyersLoginError(
+            f"FYERS token exchange failed (HTTP {response.status_code}). "
+            f"Response: {detail}. Verify that the App ID and Secret belong to the same "
+            "activated FYERS app, the redirect URI matches exactly, and this is a fresh login."
+        )
+    return str(data["access_token"])
 
 
 def get_authenticated_fyers(client_id: str, access_token: str):
-    """Returns a ready-to-use FyersModel instance, given a client_id and an
-    access_token you already obtained via the manual flow above."""
-    return fyersModel.FyersModel(client_id=client_id, token=access_token, is_async=False, log_path="")
-
-
-# ---------------------------------------------------------------------------
-# Suggested Streamlit flow (manual, once a day):
-#   1. Button: "Get Fyers login link" -> show get_login_url(...).generate_authcode()
-#   2. User clicks it, logs in, copies the resulting URL from their browser
-#   3. Text box: paste that URL -> extract_auth_code() -> exchange_code_for_token()
-#   4. Cache the resulting access_token for the rest of the day (st.cache_resource)
-# ---------------------------------------------------------------------------
+    """Return the FYERS v3 client authenticated with the current access token."""
+    return fyersModel.FyersModel(
+        client_id=client_id.strip(),
+        token=access_token,
+        is_async=False,
+        log_path="",
+    )
