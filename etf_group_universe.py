@@ -117,6 +117,25 @@ ETF_GROUP_SYMBOLS["Defensive ETF"] = [
     if any(term in symbol.upper() for term in _DEFENSIVE_TERMS)
 ]
 
+ETF_GROUP_ORDER = [
+    "ALL ETF",
+    "ALL ETFs (Liquid)",
+    "International ETF",
+    "Domestic ETF",
+    "All-One ETFs",
+    "All-One ETFs (Domestic)",
+    "All-One Domestic ETF Assets",
+    "All-One Domestic ETF Factors",
+    "All-One Domestic ETF Sectors",
+    "All-One Domestic ETF Segments",
+    "All-Sector ETFs",
+    "Defensive ETF",
+]
+ETF_GROUP_SYMBOLS = {
+    name: ETF_GROUP_SYMBOLS[name]
+    for name in ETF_GROUP_ORDER
+    if name in ETF_GROUP_SYMBOLS
+}
 ETF_GROUP_NAMES = list(ETF_GROUP_SYMBOLS.keys())
 ETF_GROUP_ALIASES = {"All ETFs": "ALL ETF"}
 
