@@ -17,7 +17,12 @@ from fyers_auth import (
 )
 import momentum_data
 from etf_index_universe import fetch_etf_and_index_universe
-from index_constituents import INDEX_CATEGORIES, fetch_index_constituents
+from index_constituents import (
+    INDEX_CATEGORIES,
+    ALL_ETF_CATEGORY,
+    fetch_index_constituents,
+    fetch_all_etfs_and_bees,
+)
 
 # ==========================================
 # PAGE CONFIGURATION & STYLING
@@ -1003,6 +1008,8 @@ elif st.session_state.navigation_tab == "INDEX_CONSTITUENTS":
         st.write("")
         if st.button("🔄 Refresh Constituents", use_container_width=True):
             fetch_index_constituents.clear()
+            if index_category == ALL_ETF_CATEGORY:
+                fetch_all_etfs_and_bees.clear()
             st.rerun()
 
     st.caption(
@@ -1040,9 +1047,15 @@ elif st.session_state.navigation_tab == "INDEX_CONSTITUENTS":
             visible_constituents = visible_constituents.loc[search_mask]
 
         metric1, metric2, metric3 = st.columns(3)
-        metric1.metric("Total Constituents", f"{len(all_constituents):,}")
+        metric1.metric(
+            "Total ETFs & BEES" if index_category == ALL_ETF_CATEGORY else "Total Constituents",
+            f"{len(all_constituents):,}",
+        )
         metric2.metric("Matching Search", f"{len(visible_constituents):,}")
-        metric3.metric("Industries Represented", f"{industry_count:,}")
+        if index_category == ALL_ETF_CATEGORY:
+            metric3.metric("Universe", "All listed ETFs & BEES")
+        else:
+            metric3.metric("Industries Represented", f"{industry_count:,}")
 
         st.markdown(f"#### {selected_index} — Constituent List")
         st.dataframe(
