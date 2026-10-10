@@ -4,6 +4,7 @@ Run by GitHub Actions after the market close. The script updates only CSV data;
 it never changes strategy settings or app code.
 """
 from datetime import date, timedelta
+from io import StringIO
 from pathlib import Path
 import sys
 import time
@@ -135,7 +136,7 @@ def sync_membership_history():
         response = requests.get(MEMBERSHIP_URL, timeout=60)
         response.raise_for_status()
         text = response.text
-        candidate = pd.read_csv(pd.io.common.StringIO(text))
+        candidate = pd.read_csv(StringIO(text))
         required = {"index_name", "symbol", "valid_from", "valid_to"}
         if len(candidate) < 1000 or not required.issubset(candidate.columns):
             raise ValueError("Downloaded membership file failed structural checks")
