@@ -120,6 +120,29 @@ def get_trusted_tickers_by_group(groups):
 
     return list(set(tickers))
 
+
+def get_selected_etf_tickers(groups):
+    """Resolve selected ETF groups to symbols, including older broker categories."""
+    tickers = set()
+    for group in groups:
+        if group in ETF_GROUP_SYMBOLS or group in ETF_GROUP_ALIASES:
+            tickers.update(get_etf_group_symbols(group))
+        elif group in ASSET_GROUPS_MAPPING:
+            tickers.update(ASSET_GROUPS_MAPPING[group])
+
+    # Keep previously available broker-derived ETF categories working too.
+    try:
+        etf_universe = fetch_etf_and_index_universe()
+        for group in groups:
+            for item in etf_universe["etfs"].get(group, []):
+                symbol = str(item.get("symbol", "")).strip()
+                if symbol:
+                    tickers.add(symbol if symbol.endswith(".NS") else f"{symbol}.NS")
+    except Exception:
+        pass
+    return tickers
+
+
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y"):
     defensive_and_regime = list(set(ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
@@ -414,7 +437,12 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         filtered_df = filtered_df.loc[:, latest_prices >= min_price]
 
     if as_of_date is not None and membership_calendar is not None and not membership_calendar.empty:
-        eligible_cols = [c for c in filtered_df.columns if momentum_data.was_member(c, as_of_date, membership_calendar)]
+        selected_etf_tickers = get_selected_etf_tickers(selected_groups)
+        eligible_cols = [
+            c for c in filtered_df.columns
+            if c in selected_etf_tickers
+            or momentum_data.was_member(c, as_of_date, membership_calendar)
+        ]
         filtered_df = filtered_df[eligible_cols]
 
     if strat.get("use_rs", True):
@@ -461,11 +489,23 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
 
 
 def run_backtest_simulation(strat_config, initial_capital, start_date, end_date, use_point_in_time=True):
-    if use_point_in_time:
-        tickers = momentum_data.load_all_archive_symbols()
+    selected_groups = strat_config.get("groups", ["Nifty 500"])
+    apply_point_in_time = use_point_in_time and any(
+        group in selected_groups for group in ("Nifty 500", "Nifty 200")
+    )
+
+    if apply_point_in_time:
+        # Keep the historical stock archive for point-in-time membership and
+        # add the selected ETF groups so they can be ranked in the same strategy.
+        tickers = list(dict.fromkeys(
+            momentum_data.load_all_archive_symbols()
+            + get_trusted_tickers_by_group(selected_groups)
+        ))
         membership_calendar = momentum_data.load_membership_calendar()
     else:
-        tickers = get_trusted_tickers_by_group(strat_config.get("groups", ["Nifty 500"]))
+        # ETF-only strategies don't need (and shouldn't inherit) the Nifty 500
+        # membership calendar.
+        tickers = get_trusted_tickers_by_group(selected_groups)
         membership_calendar = None
 
     prices_df = fetch_market_data(tickers, period="5y")
@@ -847,6 +887,18 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     else:
         st.caption("Full ETF universe not available yet (needs a working broker connection) — the checkboxes above still work.")
 
+    st.markdown("#### ETF Groups from Your Uploaded Lists")
+    st.caption(
+        "These same curated groups are available in Index Constituents and can be used "
+        "for strategy scanning, portfolio execution and backtesting."
+    )
+    selected_uploaded_etf_groups = st.multiselect(
+        "Uploaded ETF groups",
+        options=ETF_GROUP_NAMES,
+        default=[g for g in ETF_GROUP_NAMES if g in existing_groups],
+        key="strategy_uploaded_etf_groups",
+    )
+
     st.markdown("---")
     st.markdown("#### Ranking, Entry & Exit Parameters")
 
@@ -895,6 +947,8 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         if grp_liquidbees: selected_groups.append("LiquidBEES")
         if grp_gov_bond: selected_groups.append("Gov Bond")
         selected_groups.extend(selected_etf_categories)
+        selected_groups.extend(selected_uploaded_etf_groups)
+        selected_groups = list(dict.fromkeys(selected_groups))
 
         selected_periods = []
         weights = []
