@@ -35,6 +35,8 @@ jobs:
           cache: pip
       - name: Install data refresh dependencies
         run: python -m pip install --upgrade pip pandas requests jugaad-data
+      - name: Validate Python syntax
+        run: python -m py_compile app.py momentum_data.py index_history_data.py scripts/update_index_history.py
       - name: Backfill and refresh historical index datasets
         run: python scripts/update_index_history.py
       - name: Commit updated local history
