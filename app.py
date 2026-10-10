@@ -717,19 +717,41 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             membership_target == "Nifty 200" and membership_calendar.empty
         )
 
-        # Nifty 200 is absent from the available reconstructed interval ledger.
-        # Use the stored Nifty 500 intervals as a broader fallback, and disclose
-        # that approximation rather than silently presenting it as exact Nifty 200 PIT.
+        # The validated interval source begins in 2014 for Nifty 500. Preserve the
+        # older calendar before that cutoff instead of leaving early backtest dates
+        # with no eligible stocks. After the cutoff, prefer the checked-in interval
+        # ledger, which has a better constituent count than the older legacy calendar.
         if nifty200_membership_is_approximate:
             membership_calendar = index_history_data.get_membership_calendar("Nifty 500")
 
-        if membership_calendar.empty:
-            try:
-                legacy_membership = momentum_data.load_membership_calendar()
-                if legacy_membership is not None and not legacy_membership.empty:
-                    membership_calendar = legacy_membership[["symbol", "start", "end"]].copy()
-            except Exception:
-                pass
+        try:
+            legacy_membership = momentum_data.load_membership_calendar()
+        except Exception:
+            legacy_membership = pd.DataFrame(columns=["symbol", "start", "end"])
+
+        if not membership_calendar.empty and legacy_membership is not None and not legacy_membership.empty:
+            cutoff = pd.to_datetime(membership_calendar["start"], errors="coerce").min()
+            if pd.notna(cutoff):
+                legacy_prefix = legacy_membership[["symbol", "start", "end"]].copy()
+                legacy_prefix["start"] = pd.to_datetime(legacy_prefix["start"], errors="coerce")
+                legacy_prefix["end"] = pd.to_datetime(legacy_prefix["end"], errors="coerce")
+                cutoff_previous_day = cutoff - pd.Timedelta(days=1)
+                legacy_prefix = legacy_prefix[
+                    legacy_prefix["start"].notna() & (legacy_prefix["start"] < cutoff)
+                ].copy()
+                legacy_prefix["end"] = legacy_prefix["end"].fillna(cutoff_previous_day)
+                legacy_prefix.loc[
+                    legacy_prefix["end"] > cutoff_previous_day, "end"
+                ] = cutoff_previous_day
+                legacy_prefix = legacy_prefix[
+                    legacy_prefix["end"].notna()
+                    & (legacy_prefix["end"] >= legacy_prefix["start"])
+                ]
+                membership_calendar = pd.concat(
+                    [legacy_prefix, membership_calendar], ignore_index=True
+                ).drop_duplicates()
+        elif membership_calendar.empty and legacy_membership is not None and not legacy_membership.empty:
+            membership_calendar = legacy_membership[["symbol", "start", "end"]].copy()
 
         if membership_calendar.empty:
             st.error(
