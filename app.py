@@ -145,9 +145,13 @@ def get_selected_etf_tickers(groups):
 
 
 @st.cache_data(ttl=3600)
-def fetch_market_data(tickers, period="5y"):
+def fetch_market_data(tickers, period="5y", full_history=False):
     defensive_and_regime = list(set(ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
-    archive_based = momentum_data.get_prices_with_live_topup(tickers, extra_tickers=defensive_and_regime)
+    archive_based = momentum_data.get_prices_with_live_topup(
+        tickers,
+        extra_tickers=defensive_and_regime,
+        missing_period="max" if full_history else "5y",
+    )
 
     if not archive_based.empty:
         prices = archive_based
@@ -701,6 +705,18 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             pd.concat(membership_frames, ignore_index=True).drop_duplicates()
             if membership_frames else None
         )
+        # Request price history for all historical members as well as the
+        # 970-symbol archive and current index constituents. This enables
+        # members that later exited the index to be considered on earlier dates.
+        if membership_calendar is not None and not membership_calendar.empty:
+            historic_members = (
+                membership_calendar["symbol"].dropna().astype(str).str.upper().tolist()
+            )
+            historic_members = [
+                symbol if symbol.endswith(".NS") else f"{symbol}.NS"
+                for symbol in historic_members
+            ]
+            tickers = list(dict.fromkeys(tickers + historic_members))
     else:
         # ETF-only strategies don't need index membership restrictions.
         tickers = get_trusted_tickers_by_group(selected_groups)
@@ -713,7 +729,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         if relative_index_ticker not in tickers:
             tickers.append(relative_index_ticker)
 
-    prices_df = fetch_market_data(tickers, period="5y")
+    prices_df = fetch_market_data(tickers, period="5y", full_history=True)
     prices_df = prices_df.loc[start_date:end_date]
     if len(prices_df) < 252:
         return None, None, None
