@@ -125,9 +125,10 @@ def render_fyers_connection_panel():
     # The OAuth callback returns to this same Streamlit URL. Capture the code
     # directly from query parameters and exchange it automatically. The user
     # never needs to copy/paste an auth_code.
-    app_id = str(st.secrets.get("FYERS_APP_ID", "")).strip()
-    secret_key = str(st.secrets.get("FYERS_SECRET_ID", "")).strip()
-    redirect_uri = str(st.secrets.get("FYERS_REDIRECT_URI", "")).strip()
+    app_id = str(st.secrets.get("FYERS_APP_ID") or "").strip()
+    # Accept either common secret name to avoid breaking existing Streamlit setups.
+    secret_key = str(st.secrets.get("FYERS_SECRET_ID") or st.secrets.get("FYERS_SECRET_KEY") or "").strip()
+    redirect_uri = str(st.secrets.get("FYERS_REDIRECT_URI") or "").strip()
 
     callback_code = str(st.query_params.get("auth_code", "") or st.query_params.get("code", "")).strip()
     callback_state = str(st.query_params.get("state", "")).strip()
