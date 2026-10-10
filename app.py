@@ -706,6 +706,17 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             nifty200_membership = index_history_data.get_membership_calendar("Nifty 200")
             if not nifty200_membership.empty:
                 membership_frames.append(nifty200_membership)
+            else:
+                # The current reconstructed public PIT ledger does not include
+                # Nifty 200. Fall back to the broader Nifty 500 membership calendar
+                # to keep historical/delisted symbols available. This is a
+                # superset approximation, not exact historical Nifty 200 membership.
+                try:
+                    legacy_membership = momentum_data.load_membership_calendar()
+                    if legacy_membership is not None and not legacy_membership.empty:
+                        membership_frames.append(legacy_membership[["symbol", "start", "end"]])
+                except Exception:
+                    pass
 
         membership_calendar = (
             pd.concat(membership_frames, ignore_index=True).drop_duplicates()
