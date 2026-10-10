@@ -7,7 +7,14 @@ import json
 from io import StringIO
 from datetime import datetime, timedelta
 
-from fyers_auth import get_login_url, extract_auth_code, exchange_code_for_token, get_authenticated_fyers, FyersLoginError
+from fyers_auth import (
+    get_login_url,
+    exchange_code_for_token,
+    get_authenticated_fyers,
+    create_signed_state,
+    validate_signed_state,
+    FyersLoginError,
+)
 import momentum_data
 from etf_index_universe import fetch_etf_and_index_universe
 
@@ -115,42 +122,79 @@ def get_fyers_client():
 
 
 def render_fyers_connection_panel():
-    with st.expander("🔌 Fyers Connection", expanded="fyers_access_token" not in st.session_state):
+    # The OAuth callback returns to this same Streamlit URL. Capture the code
+    # directly from query parameters and exchange it automatically. The user
+    # never needs to copy/paste an auth_code.
+    app_id = str(st.secrets.get("FYERS_APP_ID", "")).strip()
+    secret_key = str(st.secrets.get("FYERS_SECRET_ID", "")).strip()
+    redirect_uri = str(st.secrets.get("FYERS_REDIRECT_URI", "")).strip()
+
+    callback_code = str(st.query_params.get("auth_code", "") or st.query_params.get("code", "")).strip()
+    callback_state = str(st.query_params.get("state", "")).strip()
+    callback_error = str(st.query_params.get("error_description", "") or st.query_params.get("error", "")).strip()
+
+    if callback_error:
+        st.error(f"FYERS login was cancelled or rejected: {callback_error}")
+        st.query_params.clear()
+    elif callback_code:
+        try:
+            if not (app_id and secret_key and redirect_uri):
+                raise FyersLoginError(
+                    "Add FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI in Streamlit Secrets first."
+                )
+            if not validate_signed_state(callback_state, secret_key):
+                raise FyersLoginError(
+                    "The FYERS login return could not be verified or has expired. "
+                    "Click Connect FYERS and complete a fresh login."
+                )
+            with st.spinner("Finishing FYERS connection..."):
+                token = exchange_code_for_token(app_id, secret_key, redirect_uri, callback_code)
+            st.session_state["fyers_access_token"] = token
+            st.session_state["fyers_client_id"] = app_id
+            st.session_state["fyers_connected_at"] = datetime.now().isoformat(timespec="seconds")
+            st.query_params.clear()
+            st.rerun()
+        except FyersLoginError as e:
+            st.error(str(e))
+            st.query_params.clear()
+        except Exception as e:
+            st.error(f"FYERS connection failed: {e}")
+            st.query_params.clear()
+
+    with st.expander("🔌 FYERS Connection", expanded="fyers_access_token" not in st.session_state):
         if "fyers_access_token" in st.session_state:
-            st.success("Connected to Fyers for this session.")
-            if st.button("Disconnect"):
-                del st.session_state["fyers_access_token"]
+            st.success("Connected to FYERS for this session.")
+            connected_at = st.session_state.get("fyers_connected_at")
+            if connected_at:
+                st.caption(f"Connected at {connected_at}")
+            if st.button("Disconnect FYERS"):
+                st.session_state.pop("fyers_access_token", None)
+                st.session_state.pop("fyers_client_id", None)
+                st.session_state.pop("fyers_connected_at", None)
                 st.rerun()
             return
 
-        # Read only FYERS_APP_ID (with -200 suffix) and other required secrets
-        app_id = st.secrets.get("FYERS_APP_ID", "").strip()
-        redirect_uri = st.secrets.get("FYERS_REDIRECT_URI", "").strip()
-        
-        # Use app_id as the secret_key for FYERS API
-        secret_key = app_id
-
-        if not (app_id and redirect_uri):
-            st.warning("Add FYERS_APP_ID (with -200 suffix) and FYERS_REDIRECT_URI to Secrets first (from myapi.fyers.in/dashboard). Until then, prices fall back to cached data.")
+        if not (app_id and secret_key and redirect_uri):
+            st.warning(
+                "Complete FYERS setup in Streamlit Secrets. Required keys: "
+                "FYERS_APP_ID, FYERS_SECRET_ID and FYERS_REDIRECT_URI. "
+                "Use the App ID and Secret from the same activated app, and make the redirect URL "
+                "exactly match the URL registered in the FYERS API dashboard."
+            )
             return
 
         try:
-            # Use app_id as client_id as well for Fyers API v3
-            login_url = get_login_url(app_id, secret_key, redirect_uri).generate_authcode()
-            st.markdown(f"1. [Click here to log into Fyers]({login_url})")
-            st.caption("2. After logging in, copy the FULL address bar contents you land on.")
-            pasted = st.text_input("3. Paste that URL (or just the auth code) here:")
-            if st.button("Connect") and pasted:
-                auth_code = extract_auth_code(pasted)
-                token = exchange_code_for_token(app_id, secret_key, redirect_uri, auth_code)
-                st.session_state["fyers_access_token"] = token
-                st.session_state["fyers_client_id"] = app_id
-                st.success("Connected!")
-                st.rerun()
+            state = create_signed_state(secret_key)
+            login_url = get_login_url(app_id, secret_key, redirect_uri, state=state).generate_authcode()
+            st.link_button("🔐 Connect FYERS", login_url, type="primary", use_container_width=True)
+            st.caption(
+                "Sign in on FYERS. After approval, you will return here and the app will finish "
+                "the connection automatically—no copying or pasting an auth code."
+            )
         except FyersLoginError as e:
             st.error(str(e))
         except Exception as e:
-            st.error(f"Couldn't set up the login link: {e}")
+            st.error(f"Couldn't set up FYERS login: {e}")
 
 
 def get_live_prices(yf_tickers):
