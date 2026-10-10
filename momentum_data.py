@@ -218,7 +218,7 @@ def _download_yahoo_close(tickers, period="5y", start=None, chunk_size=60):
     return result.sort_index()
 
 
-def get_prices_with_live_topup(tickers, extra_tickers=None) -> pd.DataFrame:
+def get_prices_with_live_topup(tickers, extra_tickers=None, missing_period="5y") -> pd.DataFrame:
     """Load archive history, fetch full history for missing symbols, and refresh stale prices.
 
     ETFs often don't exist in the stock archive. They still need a multi-year
@@ -239,8 +239,9 @@ def get_prices_with_live_topup(tickers, extra_tickers=None) -> pd.DataFrame:
 
     missing_symbols = [ticker for ticker in all_needed if ticker not in archive.columns]
 
-    # Download full history for selected ETFs and other non-archive symbols.
-    missing_history = _download_yahoo_close(missing_symbols, period="5y")
+    # Backtests can request max available Yahoo history for non-archive symbols;
+    # live scans keep the lighter five-year fetch by default.
+    missing_history = _download_yahoo_close(missing_symbols, period=missing_period)
 
     # Incremental updates are only needed for symbols already covered by archive.
     gap_days = (pd.Timestamp.today().normalize() - last_archive_date).days
