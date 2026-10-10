@@ -5,6 +5,7 @@ from io import StringIO
 import pandas as pd
 import requests
 import streamlit as st
+from etf_group_universe import ETF_GROUP_SYMBOLS, get_etf_group_constituents
 
 
 ETF_SYMBOL_MASTER_URL = "https://public.fyers.in/sym_details/NSE_CM.csv"
@@ -56,7 +57,7 @@ INDEX_CATEGORIES = {
         "Nifty Services Sector": "ind_niftyservsectorlist.csv",
     },
     ALL_ETF_CATEGORY: {
-        ALL_ETF_OPTION: ALL_ETF_SENTINEL,
+        group_name: group_name for group_name in ETF_GROUP_SYMBOLS
     },
 }
 
@@ -207,8 +208,8 @@ def fetch_all_etfs_and_bees():
 @st.cache_data(ttl=21600, show_spinner=False)
 def fetch_index_constituents(category: str, index_name: str):
     """Return (constituents dataframe, successful official CSV URL)."""
-    if category == ALL_ETF_CATEGORY and index_name == ALL_ETF_OPTION:
-        return fetch_all_etfs_and_bees()
+    if category == ALL_ETF_CATEGORY:
+        return get_etf_group_constituents(index_name)
     if category not in INDEX_CATEGORIES or index_name not in INDEX_CATEGORIES[category]:
         raise ValueError("Please select a supported index.")
 
