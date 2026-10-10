@@ -529,12 +529,31 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         if benchmark.empty:
             return []
 
+        # Restrict the numerator to the configured main group. In point-in-time
+        # stock backtests, retain the historical archive names and let the
+        # membership calendar below decide which ones were eligible on each date.
+        if candidate_tickers is None:
+            selected_etf_tickers = get_selected_etf_tickers(selected_groups)
+            has_equity_group = any(g in selected_groups for g in ("Nifty 500", "Nifty 200"))
+            if has_equity_group and membership_calendar is not None:
+                candidate_cols = [
+                    c for c in filtered_df.columns
+                    if not c.startswith("^")
+                    and (
+                        c not in ALWAYS_FETCH_OVERLAY_TICKERS
+                        and c != GSEC_REGIME_TICKER
+                        or c in selected_etf_tickers
+                    )
+                ]
+            else:
+                main_group_tickers = set(get_trusted_tickers_by_group(selected_groups))
+                candidate_cols = [c for c in filtered_df.columns if c in main_group_tickers]
+            filtered_df = filtered_df.loc[:, candidate_cols]
+        else:
+            candidate_cols = [c for c in filtered_df.columns if c in candidate_tickers]
+
         # RS is the stock's price divided by the selected index level. Scaling
         # the ratio by 100 makes it easier to read but doesn't change the MA test.
-        candidate_cols = [
-            c for c in filtered_df.columns
-            if c != relative_index_ticker and not c.startswith("^")
-        ]
         candidate_prices = prices_df.reindex(columns=candidate_cols)
         aligned_benchmark = benchmark.reindex(candidate_prices.index).ffill()
         rs_ratio = candidate_prices.div(aligned_benchmark.replace(0, np.nan), axis=0) * 100.0
