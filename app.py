@@ -68,32 +68,43 @@ GSEC_REGIME_TICKER = "SETFGSEC.NS"
 def get_trusted_tickers_by_group(groups):
     tickers = []
 
-    if "Nifty 500" in groups or "Nifty 200" in groups:
-        official_nse_url = "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv"
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
+    # Fetch each selected index's own official constituent list. Do not
+    # approximate Nifty 200 by taking the first 200 rows of an alphabetically
+    # sorted Nifty 500 file.
+    equity_indices = [
+        name for name in ("Nifty 500", "Nifty 200") if name in groups
+    ]
+    for index_name in equity_indices:
         try:
-            response = session.get(official_nse_url, timeout=10)
-            if response.status_code == 200:
-                df = pd.read_csv(StringIO(response.text))
-                if "Symbol" in df.columns:
-                    n500 = [f"{str(sym).strip()}.NS" for sym in df["Symbol"].dropna().unique()]
-                    if "Nifty 200" in groups and "Nifty 500" not in groups:
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
+            constituents, _source_url = fetch_index_constituents("Broad Market", index_name)
+            if "Yahoo Ticker" in constituents.columns:
+                tickers.extend(
+                    constituents["Yahoo Ticker"].dropna().astype(str).str.strip().tolist()
+                )
+            elif "Symbol" in constituents.columns:
+                tickers.extend(
+                    f"{str(symbol).strip()}.NS"
+                    for symbol in constituents["Symbol"].dropna().unique()
+                )
         except Exception:
-            github_mirror_url = "https://raw.githubusercontent.com/indian-stock-market/nifty-500-constituents/main/nifty500.csv"
-            try:
-                df_mirror = pd.read_csv(github_mirror_url)
-                if "Symbol" in df_mirror.columns:
-                    n500 = [f"{str(sym).strip()}.NS" for sym in df_mirror["Symbol"].dropna().unique()]
-                    if "Nifty 200" in groups and "Nifty 500" not in groups:
-                        tickers.extend(n500[:200])
-                    else:
-                        tickers.extend(n500)
-            except Exception:
-                tickers.extend(["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "SBIN.NS"])
+            if index_name == "Nifty 500":
+                # Retain the pre-existing mirror fallback for Nifty 500 if
+                # official endpoints are temporarily unavailable.
+                try:
+                    mirror_url = "https://raw.githubusercontent.com/indian-stock-market/nifty-500-constituents/main/nifty500.csv"
+                    mirror = pd.read_csv(mirror_url)
+                    if "Symbol" in mirror.columns:
+                        tickers.extend(
+                            f"{str(symbol).strip()}.NS"
+                            for symbol in mirror["Symbol"].dropna().unique()
+                        )
+                except Exception:
+                    tickers.extend([
+                        "RELIANCE.NS", "TCS.NS", "INFY.NS",
+                        "HDFCBANK.NS", "ICICIBANK.NS",
+                    ])
+            # If Nifty 200's list is unavailable, fail closed for that group
+            # instead of silently using an unrelated alphabetical subset.
 
     for grp in groups:
         if grp in ETF_GROUP_SYMBOLS or grp in ETF_GROUP_ALIASES:
