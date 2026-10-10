@@ -13,6 +13,15 @@ import requests
 
 ROOT = Path(__file__).resolve().parent
 INDEX_PRICE_DIR = ROOT / "data" / "index_prices"
+MEMBERSHIP_SNAPSHOT_DIR = ROOT / "data" / "index_membership_snapshots"
+MEMBERSHIP_SNAPSHOT_PATHS = {
+    "Nifty 200": MEMBERSHIP_SNAPSHOT_DIR / "Nifty_200.csv",
+    "Nifty 500": MEMBERSHIP_SNAPSHOT_DIR / "Nifty_500.csv",
+}
+MEMBERSHIP_SNAPSHOT_URLS = {
+    "Nifty 200": "https://raw.githubusercontent.com/floyds1995/Auto-Index-Constituents-Tracker/main/NSE/Nifty_200.csv",
+    "Nifty 500": "https://raw.githubusercontent.com/floyds1995/Auto-Index-Constituents-Tracker/main/NSE/Nifty_500.csv",
+}
 MEMBERSHIP_PATH = ROOT / "data" / "index_membership_history.csv"
 MEMBERSHIP_URL = (
     "https://raw.githubusercontent.com/aditya-jha/nse-historical-membership/"
@@ -143,12 +152,66 @@ def load_membership_history():
     return frame.dropna(subset=["symbol", "valid_from"])
 
 
+def _snapshot_membership_calendar(index_name):
+    """Convert dated constituent snapshots into membership intervals.
+
+    The source is monthly/periodic reconstructed snapshots, not a certified
+    day-by-day exchange ledger. Each new snapshot is treated as effective on
+    its stated date; the prior snapshot's membership ends the preceding day.
+    """
+    path = MEMBERSHIP_SNAPSHOT_PATHS.get(index_name)
+    if path is None or not path.exists():
+        return pd.DataFrame(columns=EMPTY_CALENDAR_COLUMNS)
+    try:
+        frame = pd.read_csv(path, dtype={"date": str, "tickers": str})
+    except (OSError, ValueError, pd.errors.ParserError):
+        return pd.DataFrame(columns=EMPTY_CALENDAR_COLUMNS)
+    if not {"date", "tickers"}.issubset(frame.columns):
+        return pd.DataFrame(columns=EMPTY_CALENDAR_COLUMNS)
+
+    # The source contains both ISO dates and newer month/day/year dates.
+    frame["date"] = pd.to_datetime(frame["date"], format="mixed", errors="coerce")
+    frame["tickers"] = frame["tickers"].fillna("").astype(str)
+    frame = frame.dropna(subset=["date"]).sort_values("date").drop_duplicates("date", keep="last")
+    if frame.empty:
+        return pd.DataFrame(columns=EMPTY_CALENDAR_COLUMNS)
+
+    intervals = []
+    active = {}
+    for _, row in frame.iterrows():
+        as_of = pd.Timestamp(row["date"]).tz_localize(None).normalize()
+        members = {
+            symbol.strip().upper().removesuffix(".NS")
+            for symbol in row["tickers"].split(",")
+            if symbol.strip()
+        }
+        old_members = set(active)
+        for symbol in old_members - members:
+            intervals.append({
+                "symbol": symbol + ".NS",
+                "start": active.pop(symbol),
+                "end": as_of - pd.Timedelta(days=1),
+            })
+        for symbol in members - old_members:
+            active[symbol] = as_of
+
+    for symbol, start in active.items():
+        intervals.append({"symbol": symbol + ".NS", "start": start, "end": pd.NaT})
+    return pd.DataFrame(intervals, columns=EMPTY_CALENDAR_COLUMNS).drop_duplicates().reset_index(drop=True)
+
+
 def get_membership_calendar(index_name):
     """Return a symbol/start/end calendar accepted by momentum_data.was_member.
 
-    Source intervals use exclusive valid_to dates, so valid_to is shifted back
-    one calendar day for the legacy inclusive membership check.
+    For Nifty 200/500, prefer the durable local constituent snapshots, which
+    record recurring historical snapshots. For other indices, use the public
+    reconstructed interval ledger. Legacy interval valid_to dates are exclusive,
+    so valid_to is shifted back one day for the existing inclusive membership test.
     """
+    snapshot_calendar = _snapshot_membership_calendar(index_name)
+    if not snapshot_calendar.empty:
+        return snapshot_calendar
+
     frame = load_membership_history()
     if frame.empty:
         return pd.DataFrame(columns=EMPTY_CALENDAR_COLUMNS)
