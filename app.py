@@ -158,7 +158,10 @@ def fetch_market_data(tickers, period="5y"):
         else:
             prices = data
 
-    prices = prices.dropna(thresh=int(len(prices) * 0.7), axis=1).ffill().bfill()
+    # Keep ETFs with shorter available histories; the old 70% threshold
+    # silently removed many listed funds and bfill leaked future prices into
+    # historical backtests.
+    prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index().ffill()
     return prices
 
 # ==========================================
