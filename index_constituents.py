@@ -52,6 +52,14 @@ INDEX_CATEGORIES = {
     },
 }
 
+# The ETF category uses the current public NSE cash-market symbol master.
+INDEX_CATEGORIES[ALL_ETF_CATEGORY] = {ALL_ETF_OPTION: ALL_ETF_SENTINEL}
+
+ETF_SYMBOL_MASTER_URL = "https://public.fyers.in/sym_details/NSE_CM.csv"
+ALL_ETF_CATEGORY = "ALL ETF"
+ALL_ETF_OPTION = "ALL ETF & BEES"
+ALL_ETF_SENTINEL = "__ALL_ETF_BEES__"
+
 SOURCE_BASES = (
     "https://www.niftyindices.com/IndexConstituent/",
     "https://nsearchives.nseindia.com/content/indices/",
@@ -125,8 +133,82 @@ def _normalise_constituent_csv(csv_text: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
+def fetch_all_etfs_and_bees():
+    """Return currently listed NSE ETF/BEES symbols found in FYERS' public symbol master."""
+    try:
+        response = requests.get(
+            ETF_SYMBOL_MASTER_URL,
+            headers=REQUEST_HEADERS,
+            timeout=30,
+        )
+        response.raise_for_status()
+        raw = pd.read_csv(
+            StringIO(response.content.decode("utf-8-sig", errors="replace")),
+            header=None,
+            dtype=str,
+            on_bad_lines="skip",
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Couldn't download the current NSE cash-market symbol master for ALL ETF. "
+            "Please try Refresh Constituents again later."
+        ) from exc
+
+    # FYERS' public symbol master has no header. These columns follow the
+    # published file layout: name=1, ISIN=5, symbol=9.
+    if raw.shape[1] <= 9:
+        raise RuntimeError("The ETF symbol master format has changed; unable to read it safely.")
+
+    names = raw.iloc[:, 1].fillna("").astype(str).str.strip()
+    full_symbols = raw.iloc[:, 9].fillna("").astype(str).str.strip()
+    isins = raw.iloc[:, 5].fillna("").astype(str).str.strip() if raw.shape[1] > 5 else pd.Series("", index=raw.index)
+
+    # ETFs generally contain ETF in the display name; Nippon India's BeES
+    # products are also matched explicitly, including names where ETF is absent.
+    name_pattern = r"\bETF\b|BEES|EXCHANGE[\s-]*TRADED[\s-]*FUND"
+    symbol_pattern = r"ETF|BEES|LIQUIDCASE"
+    looks_like_etf = (
+        names.str.contains(name_pattern, case=False, regex=True, na=False)
+        | full_symbols.str.contains(symbol_pattern, case=False, regex=True, na=False)
+    )
+
+    # The NSE_CM source is the cash-market symbol master. Keep NSE symbols,
+    # excluding derivative-style codes if the provider ever includes one.
+    is_nse_symbol = full_symbols.str.startswith("NSE:", na=False)
+    not_derivative = ~full_symbols.str.upper().str.endswith(("-CE", "-PE"), na=False)
+    keep = looks_like_etf & is_nse_symbol & not_derivative
+
+    results = pd.DataFrame({
+        "Company Name": names[keep],
+        "Industry": "ETF / BEES",
+        "Symbol": full_symbols[keep]
+            .str.replace(r"^NSE:", "", regex=True)
+            .str.replace(r"-(EQ|BE|SM)$", "", regex=True),
+        "Series": full_symbols[keep].str.extract(r"-(EQ|BE|SM)$", expand=False).fillna(""),
+        "ISIN Code": isins[keep],
+    })
+    results["Yahoo Ticker"] = results["Symbol"] + ".NS"
+    results = results[results["Symbol"].ne("")]
+    results = results.drop_duplicates(subset=["Symbol"]).sort_values(
+        "Symbol", kind="stable"
+    ).reset_index(drop=True)
+
+    if results.empty:
+        raise RuntimeError(
+            "The symbol master downloaded successfully, but no ETF/BEES symbols were identified. "
+            "The source format or ETF naming may have changed."
+        )
+
+    return results[
+        ["Company Name", "Industry", "Symbol", "Yahoo Ticker", "Series", "ISIN Code"]
+    ], ETF_SYMBOL_MASTER_URL
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
 def fetch_index_constituents(category: str, index_name: str):
     """Return (constituents dataframe, successful official CSV URL)."""
+    if category == ALL_ETF_CATEGORY and index_name == ALL_ETF_OPTION:
+        return fetch_all_etfs_and_bees()
     if category not in INDEX_CATEGORIES or index_name not in INDEX_CATEGORIES[category]:
         raise ValueError("Please select a supported index.")
 
