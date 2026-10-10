@@ -55,10 +55,10 @@ INDEX_CATEGORIES = {
         "Nifty MNC": "ind_niftymnc_list.csv",
         "Nifty Services Sector": "ind_niftyservsectorlist.csv",
     },
+    ALL_ETF_CATEGORY: {
+        ALL_ETF_OPTION: ALL_ETF_SENTINEL,
+    },
 }
-
-# The ETF category uses the current public NSE cash-market symbol master.
-INDEX_CATEGORIES[ALL_ETF_CATEGORY] = {ALL_ETF_OPTION: ALL_ETF_SENTINEL}
 
 SOURCE_BASES = (
     "https://www.niftyindices.com/IndexConstituent/",
@@ -180,7 +180,7 @@ def fetch_all_etfs_and_bees():
 
     results = pd.DataFrame({
         "Company Name": names[keep],
-        "Industry": "ETF / BEES",
+        "Industry": pd.Series("ETF / BEES", index=names[keep].index),
         "Symbol": full_symbols[keep]
             .str.replace(r"^NSE:", "", regex=True)
             .str.replace(r"-(EQ|BE|SM)$", "", regex=True),
