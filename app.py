@@ -157,7 +157,13 @@ def fetch_market_data(tickers, period="5y", full_history=False):
         prices = archive_based
     else:
         all_tickers = list(set(tickers + defensive_and_regime))
-        data = yf.download(tickers=all_tickers, period=period, interval="1d", auto_adjust=True, progress=False)
+        data = yf.download(
+            tickers=all_tickers,
+            period="max" if full_history else period,
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+        )
         if isinstance(data.columns, pd.MultiIndex):
             prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
         else:
@@ -703,7 +709,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 
         membership_calendar = (
             pd.concat(membership_frames, ignore_index=True).drop_duplicates()
-            if membership_frames else None
+            if membership_frames else pd.DataFrame(columns=["symbol", "start", "end"])
         )
         # Request price history for all historical members as well as the
         # 970-symbol archive and current index constituents. This enables
