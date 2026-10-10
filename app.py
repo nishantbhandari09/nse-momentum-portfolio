@@ -16,6 +16,7 @@ from fyers_auth import (
     FyersLoginError,
 )
 import momentum_data
+import index_history_data
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
     INDEX_CATEGORIES,
@@ -158,9 +159,22 @@ def fetch_market_data(tickers, period="5y"):
         else:
             prices = data
 
-    # Keep ETFs with shorter available histories; the old 70% threshold
-    # silently removed many listed funds and bfill leaked future prices into
-    # historical backtests.
+    # Prefer the repository-stored official Nifty index close series over
+    # vendor fallback values. These CSVs persist in GitHub and are updated daily.
+    try:
+        stored_index_prices = index_history_data.load_index_close_prices()
+        if not stored_index_prices.empty:
+            if prices is None or prices.empty:
+                prices = stored_index_prices
+            else:
+                prices = prices.combine_first(stored_index_prices)
+                prices.update(stored_index_prices)
+    except Exception:
+        # Historical index files may not have been seeded yet; retain the
+        # existing archive/Yahoo fallback rather than blocking the app.
+        pass
+
+    # Keep ETFs with shorter available histories; never backfill future prices.
     prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index().ffill()
     return prices
 
@@ -443,7 +457,13 @@ def _market_trend_is_bullish(strat, as_of_date=None):
         # Volatility Stop (ATR-based trailing stop). Above the stop = bullish.
         atr_period = int(strat.get("market_trend_vstop_atr_period", 10))
         multiplier = float(strat.get("market_trend_vstop_multiplier", 2.0))
-        ohlc = yf.download(ticker, period="5y", interval="1d", auto_adjust=True, progress=False)
+        # Use the checked-in official OHLC cache first. Yahoo remains a fallback
+        # until the initial backfill has completed or if an index file is missing.
+        ohlc = index_history_data.load_index_ohlc(ticker)
+        if not ohlc.empty:
+            ohlc = ohlc.set_index("Date")
+        else:
+            ohlc = yf.download(ticker, period="5y", interval="1d", auto_adjust=True, progress=False)
         if ohlc.empty:
             return False
         if isinstance(ohlc.columns, pd.MultiIndex):
@@ -656,10 +676,33 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             momentum_data.load_all_archive_symbols()
             + get_trusted_tickers_by_group(selected_groups)
         ))
-        membership_calendar = momentum_data.load_membership_calendar()
+        # Load historical membership for the selected equity index universe.
+        # Nifty 500 retains the app's existing calendar (the primary source
+        # already used by this project); Nifty 200 uses the broader historical
+        # index ledger. If both are selected, Nifty 500 is the superset.
+        membership_frames = []
+        if "Nifty 500" in selected_groups:
+            try:
+                legacy_membership = momentum_data.load_membership_calendar()
+                if legacy_membership is not None and not legacy_membership.empty:
+                    membership_frames.append(legacy_membership[["symbol", "start", "end"]])
+            except Exception:
+                pass
+            if not membership_frames:
+                fallback_membership = index_history_data.get_membership_calendar("Nifty 500")
+                if not fallback_membership.empty:
+                    membership_frames.append(fallback_membership)
+        elif "Nifty 200" in selected_groups:
+            nifty200_membership = index_history_data.get_membership_calendar("Nifty 200")
+            if not nifty200_membership.empty:
+                membership_frames.append(nifty200_membership)
+
+        membership_calendar = (
+            pd.concat(membership_frames, ignore_index=True).drop_duplicates()
+            if membership_frames else None
+        )
     else:
-        # ETF-only strategies don't need (and shouldn't inherit) the Nifty 500
-        # membership calendar.
+        # ETF-only strategies don't need index membership restrictions.
         tickers = get_trusted_tickers_by_group(selected_groups)
         membership_calendar = None
 
