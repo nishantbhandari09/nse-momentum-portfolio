@@ -230,15 +230,14 @@ def get_prices_with_live_topup(tickers, extra_tickers=None) -> pd.DataFrame:
 
     requested = list(dict.fromkeys(ticker for ticker in tickers if ticker))
     extras = list(dict.fromkeys(ticker for ticker in (extra_tickers or []) if ticker))
-    archived_cols = [ticker for ticker in requested if ticker in archive.columns]
+    all_needed = list(dict.fromkeys(requested + extras))
+    archived_cols = [ticker for ticker in all_needed if ticker in archive.columns]
     relevant = archive[archived_cols].copy()
     last_archive_date = archive.index.max()
     if pd.isna(last_archive_date):
         return relevant
 
-    missing_symbols = list(dict.fromkeys(
-        [ticker for ticker in requested + extras if ticker not in archive.columns]
-    ))
+    missing_symbols = [ticker for ticker in all_needed if ticker not in archive.columns]
 
     # Download full history for selected ETFs and other non-archive symbols.
     missing_history = _download_yahoo_close(missing_symbols, period="5y")
