@@ -111,10 +111,17 @@ ETF_GROUP_SYMBOLS["Domestic ETF"] = [
     symbol for symbol in ETF_GROUP_SYMBOLS["ALL ETF"]
     if symbol not in INTERNATIONAL_EXPOSURE_SYMBOLS
 ]
-_DEFENSIVE_TERMS = ("GOLD", "SILVER", "GILT", "GSEC", "LIQUID", "CASH", "BOND")
+# One preferred ETF per defensive asset type, selected from the user's
+# All-One lists: gold, silver, government bonds, and liquid/cash.
+_DEFENSIVE_PREFERRED = [
+    "GOLDBEES",   # Gold
+    "SILVERBEES", # Silver
+    "LTGILTBEES", # Government bonds / gilt
+    "LIQUIDCASE", # Liquid / cash equivalent
+]
 ETF_GROUP_SYMBOLS["Defensive ETF"] = [
-    symbol for symbol in ETF_GROUP_SYMBOLS["ALL ETFs (Liquid)"]
-    if any(term in symbol.upper() for term in _DEFENSIVE_TERMS)
+    symbol for symbol in _DEFENSIVE_PREFERRED
+    if symbol in ETF_GROUP_SYMBOLS["ALL ETF"]
 ]
 
 ETF_GROUP_ORDER = [
