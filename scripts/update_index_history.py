@@ -14,7 +14,14 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from index_history_data import INDEX_HISTORY_SPECS, INDEX_PRICE_DIR, MEMBERSHIP_PATH, MEMBERSHIP_URL
+from index_history_data import (
+    INDEX_HISTORY_SPECS,
+    INDEX_PRICE_DIR,
+    MEMBERSHIP_PATH,
+    MEMBERSHIP_URL,
+    MEMBERSHIP_SNAPSHOT_DIR,
+    MEMBERSHIP_SNAPSHOT_URLS,
+)
 
 TODAY = date.today()
 MAX_RETRIES = 3
@@ -154,9 +161,43 @@ def sync_membership_history():
         return MEMBERSHIP_PATH.exists()
 
 
+def sync_constituent_snapshots():
+    """Sync periodic historical Nifty 200/500 member snapshots into the repo."""
+    good = 0
+    MEMBERSHIP_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    for index_name, url in MEMBERSHIP_SNAPSHOT_URLS.items():
+        path = MEMBERSHIP_SNAPSHOT_DIR / f"{index_name.replace(' ', '_')}.csv"
+        try:
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            content = response.text
+            candidate = pd.read_csv(StringIO(content), dtype={"date": str, "tickers": str})
+            if not {"date", "tickers"}.issubset(candidate.columns) or len(candidate) < 100:
+                raise ValueError("Snapshot file failed schema/row-count validation")
+            parsed_dates = pd.to_datetime(candidate["date"], format="mixed", errors="coerce")
+            if parsed_dates.notna().sum() < 100 or candidate["tickers"].fillna("").str.len().max() < 100:
+                raise ValueError("Snapshot file contained too few valid dates or constituent lists")
+            # Only replace local files after the complete response has passed validation.
+            path.write_text(content, encoding="utf-8")
+            latest_date = parsed_dates.max().date()
+            print(
+                f"UPDATED {index_name} constituent snapshots: {len(candidate)} rows; "
+                f"latest snapshot {latest_date}",
+                flush=True,
+            )
+            good += 1
+        except Exception as exc:
+            print(f"WARNING: {index_name} snapshot sync failed; preserving local file: {exc}", flush=True)
+    return good > 0 or all(
+        (MEMBERSHIP_SNAPSHOT_DIR / f"{name.replace(' ', '_')}.csv").exists()
+        for name in MEMBERSHIP_SNAPSHOT_URLS
+    )
+
+
 def main():
     INDEX_PRICE_DIR.mkdir(parents=True, exist_ok=True)
     membership_ok = sync_membership_history()
+    snapshot_ok = sync_constituent_snapshots()
     results = {}
     for display_name, spec in INDEX_HISTORY_SPECS.items():
         try:
@@ -167,7 +208,7 @@ def main():
 
     good_prices = sum(bool(v) for v in results.values())
     print(f"Index refresh result: {good_prices}/{len(results)} indices available.", flush=True)
-    if good_prices == 0 and not membership_ok:
+    if good_prices == 0 and not membership_ok and not snapshot_ok:
         raise SystemExit("No index prices or membership data were available; refusing an empty commit.")
     if not any((INDEX_PRICE_DIR / spec["filename"]).exists() for spec in INDEX_HISTORY_SPECS.values()):
         raise SystemExit("No historical index price files exist after the refresh.")
