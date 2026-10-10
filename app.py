@@ -404,6 +404,84 @@ def calculate_strategy_metrics(strat):
     }
 
 
+MAJOR_MARKET_INDICES = {
+    "Nifty 50": "^NSEI",
+    "Nifty Bank": "^NSEBANK",
+    "Nifty 500": "^CRSLDX",
+    "Nifty 200": "^CNX200",
+    "Nifty IT": "^CNXIT",
+    "Nifty Pharma": "^CNXPHARMA",
+    "Nifty Auto": "^CNXAUTO",
+    "Nifty FMCG": "^CNXFMCG",
+    "Nifty Metal": "^CNXMETAL",
+}
+
+
+def _market_trend_is_bullish(strat, as_of_date=None):
+    """Return True when the selected index is above its configured trend indicator."""
+    if not strat.get("use_market_trend_filter", False):
+        return True
+    index_name = strat.get("market_trend_index", "Nifty 50")
+    ticker = MAJOR_MARKET_INDICES.get(index_name)
+    if not ticker:
+        return True
+    try:
+        history = fetch_market_data([ticker], period="5y")
+        if history.empty or ticker not in history.columns:
+            return False
+        series = history[ticker].dropna()
+        if as_of_date is not None:
+            series = series.loc[:pd.Timestamp(as_of_date)]
+        indicator = strat.get("market_trend_indicator", "Moving Average")
+        if indicator == "Moving Average":
+            period = int(strat.get("market_trend_ma_period", 200))
+            ma_type = strat.get("market_trend_ma_type", "EMA")
+            average = series.ewm(span=period, adjust=False).mean() if ma_type == "EMA" else series.rolling(period).mean()
+            if len(series) < period or pd.isna(average.iloc[-1]):
+                return False
+            return bool(series.iloc[-1] > average.iloc[-1])
+        # Volatility Stop (ATR-based trailing stop). Above the stop = bullish.
+        atr_period = int(strat.get("market_trend_vstop_atr_period", 10))
+        multiplier = float(strat.get("market_trend_vstop_multiplier", 2.0))
+        ohlc = yf.download(ticker, period="5y", interval="1d", auto_adjust=True, progress=False)
+        if ohlc.empty:
+            return False
+        if isinstance(ohlc.columns, pd.MultiIndex):
+            if "Close" in ohlc.columns.get_level_values(0):
+                close = ohlc["Close"][ticker] if ticker in ohlc["Close"].columns else ohlc["Close"].iloc[:, 0]
+            else:
+                close = ohlc.xs("Close", axis=1, level=1).iloc[:, 0]
+            high = ohlc.xs("High", axis=1, level=0).iloc[:, 0] if "High" in ohlc.columns.get_level_values(0) else close
+            low = ohlc.xs("Low", axis=1, level=0).iloc[:, 0] if "Low" in ohlc.columns.get_level_values(0) else close
+        else:
+            close = ohlc["Close"]
+            high = ohlc["High"] if "High" in ohlc.columns else close
+            low = ohlc["Low"] if "Low" in ohlc.columns else close
+        frame = pd.DataFrame({"close": close, "high": high, "low": low}).dropna()
+        if as_of_date is not None:
+            frame = frame.loc[:pd.Timestamp(as_of_date)]
+        if len(frame) < atr_period + 2:
+            return False
+        previous_close = frame["close"].shift(1)
+        true_range = pd.concat([
+            frame["high"] - frame["low"],
+            (frame["high"] - previous_close).abs(),
+            (frame["low"] - previous_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = true_range.ewm(alpha=1 / atr_period, adjust=False, min_periods=atr_period).mean()
+        long_stop = frame["close"].rolling(atr_period).max() - multiplier * atr
+        # Use an ATR trailing stop approximation for the trend regime.
+        stop = long_stop.copy()
+        for i in range(1, len(stop)):
+            if pd.isna(stop.iloc[i]) or pd.isna(stop.iloc[i - 1]):
+                continue
+            if frame["close"].iloc[i - 1] > stop.iloc[i - 1]:
+                stop.iloc[i] = max(stop.iloc[i], stop.iloc[i - 1])
+        return bool(frame["close"].iloc[-1] > stop.iloc[-1])
+    except Exception:
+        return False
+
+
 def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
 
@@ -418,6 +496,14 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
 
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
+
+    trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
+    if strat.get("use_market_trend_filter", False) and not trend_bullish:
+        # Bearish regime: do not open new positions. Existing holdings may be
+        # liquidated at the backtest rebalance if the exit rule is enabled.
+        if strat.get("market_trend_exit_on_bearish", True):
+            current_holdings = []
+        return []
 
     ma_config = strat.get("moving_average", "200 EMA")
     if ma_config != "None":
@@ -922,7 +1008,6 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
         p120 = st.checkbox("120 Days (6 Months)", value=(120 in existing_periods))
         p90 = st.checkbox("90 Days (3 Months)", value=(90 in existing_periods))
         p60 = st.checkbox("60 Days (2 Months)", value=(60 in existing_periods))
-        skip_days = st.number_input("Skip Most Recent (Days) :", value=int(edit_strat.get("skip_days", 21)), min_value=0, max_value=60)
 
     with sd_r2:
         st.caption("Proximity Filters (% from Period High/Low) :")
@@ -938,6 +1023,64 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
 
         use_rs = st.checkbox("Enable Relative Strength Ratio Filter", value=edit_strat.get("use_rs", True))
         rs_benchmark = st.selectbox("RS Benchmark Ratio :", ["Nifty 500 / G-Sec", "Nifty 50 / Liquid ETF"])
+
+    st.markdown("#### Optional Market Trend Filter")
+    use_market_trend = st.checkbox(
+        "Enable Market Trend Filter",
+        value=bool(edit_strat.get("use_market_trend_filter", False)),
+        help="Use a major index regime to control whether the strategy opens positions."
+    )
+    trend_index_options = list(MAJOR_MARKET_INDICES.keys())
+    trend_index_saved = edit_strat.get("market_trend_index", "Nifty 50")
+    trend_index = st.selectbox(
+        "Reference Index",
+        trend_index_options,
+        index=trend_index_options.index(trend_index_saved) if trend_index_saved in trend_index_options else 0,
+        disabled=not use_market_trend,
+    )
+    trend_indicator_options = ["Moving Average", "VStop"]
+    trend_indicator_saved = edit_strat.get("market_trend_indicator", "Moving Average")
+    trend_indicator = st.selectbox(
+        "Trend Indicator",
+        trend_indicator_options,
+        index=trend_indicator_options.index(trend_indicator_saved) if trend_indicator_saved in trend_indicator_options else 0,
+        disabled=not use_market_trend,
+    )
+    trend_ma_type = "EMA"
+    trend_ma_period = 200
+    trend_vstop_atr = 10
+    trend_vstop_multiplier = 2.0
+    if use_market_trend and trend_indicator == "Moving Average":
+        trend_ma_c1, trend_ma_c2 = st.columns(2)
+        with trend_ma_c1:
+            trend_ma_type = st.selectbox(
+                "Moving Average Type", ["EMA", "SMA"],
+                index=["EMA", "SMA"].index(edit_strat.get("market_trend_ma_type", "EMA"))
+                if edit_strat.get("market_trend_ma_type", "EMA") in ["EMA", "SMA"] else 0,
+            )
+        with trend_ma_c2:
+            trend_ma_period = st.number_input(
+                "Moving Average Period", min_value=2, max_value=500,
+                value=int(edit_strat.get("market_trend_ma_period", 200)), step=1,
+            )
+    elif use_market_trend and trend_indicator == "VStop":
+        trend_vs_c1, trend_vs_c2 = st.columns(2)
+        with trend_vs_c1:
+            trend_vstop_atr = st.number_input(
+                "VStop ATR Period", min_value=2, max_value=100,
+                value=int(edit_strat.get("market_trend_vstop_atr_period", 10)), step=1,
+            )
+        with trend_vs_c2:
+            trend_vstop_multiplier = st.number_input(
+                "VStop ATR Multiplier", min_value=0.5, max_value=10.0,
+                value=float(edit_strat.get("market_trend_vstop_multiplier", 2.0)), step=0.5,
+            )
+    market_trend_exit_on_bearish = st.checkbox(
+        "Exit existing positions when index trend turns bearish",
+        value=bool(edit_strat.get("market_trend_exit_on_bearish", True)),
+        disabled=not use_market_trend,
+        help="When enabled, a bearish index trend closes held positions at the next strategy rebalance.",
+    )
 
     st.markdown("---")
     save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
@@ -990,7 +1133,14 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             "use_rs": use_rs,
             "rs_benchmark": rs_benchmark,
             "min_price": float(min_price),
-            "skip_days": int(skip_days),
+            "use_market_trend_filter": bool(use_market_trend),
+            "market_trend_index": trend_index,
+            "market_trend_indicator": trend_indicator,
+            "market_trend_ma_type": trend_ma_type,
+            "market_trend_ma_period": int(trend_ma_period),
+            "market_trend_vstop_atr_period": int(trend_vstop_atr),
+            "market_trend_vstop_multiplier": float(trend_vstop_multiplier),
+            "market_trend_exit_on_bearish": bool(market_trend_exit_on_bearish),
             "positions": edit_strat.get("positions", [])
         }
 
