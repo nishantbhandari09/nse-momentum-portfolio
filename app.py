@@ -23,6 +23,12 @@ from index_constituents import (
     fetch_index_constituents,
     fetch_all_etfs_and_bees,
 )
+from etf_group_universe import (
+    ETF_GROUP_NAMES,
+    ETF_GROUP_SYMBOLS,
+    ETF_GROUP_ALIASES,
+    get_etf_group_symbols,
+)
 
 # ==========================================
 # PAGE CONFIGURATION & STYLING
@@ -40,10 +46,16 @@ st.markdown("""
 
 ASSET_GROUPS_MAPPING = {
     "Gold ETF": ["GOLDBEES.NS"],
-    "LiquidBEES": ["LIQUIDCASE.NS"],
+    "LiquidBEES": ["LIQUIDBEES.NS"],
     "Gov Bond": ["SETFGSEC.NS"],
-    "All ETFs": ["GOLDBEES.NS", "LIQUIDCASE.NS", "SETFGSEC.NS", "NIFTYBEES.NS", "JUNIORBEES.NS", "BANKBEES.NS"]
 }
+
+# Kept as a small overlay for portfolio metrics and regime checks. This is
+# deliberately separate from the full user-selected ALL ETF universe.
+ALWAYS_FETCH_OVERLAY_TICKERS = [
+    "GOLDBEES.NS", "LIQUIDBEES.NS", "SETFGSEC.NS",
+    "NIFTYBEES.NS", "JUNIORBEES.NS", "BANKBEES.NS",
+]
 
 NIFTY_REGIME_TICKER = "^CRSLDX"
 GSEC_REGIME_TICKER = "SETFGSEC.NS"
@@ -83,10 +95,18 @@ def get_trusted_tickers_by_group(groups):
                 tickers.extend(["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "LT.NS", "SBIN.NS"])
 
     for grp in groups:
-        if grp in ASSET_GROUPS_MAPPING:
+        if grp in ETF_GROUP_SYMBOLS or grp in ETF_GROUP_ALIASES:
+            tickers.extend(get_etf_group_symbols(grp))
+        elif grp in ASSET_GROUPS_MAPPING:
             tickers.extend(ASSET_GROUPS_MAPPING[grp])
 
-    remaining_groups = [g for g in groups if g not in ASSET_GROUPS_MAPPING and g not in ("Nifty 500", "Nifty 200")]
+    known_group_names = (
+        set(ASSET_GROUPS_MAPPING)
+        | set(ETF_GROUP_SYMBOLS)
+        | set(ETF_GROUP_ALIASES)
+        | {"Nifty 500", "Nifty 200"}
+    )
+    remaining_groups = [g for g in groups if g not in known_group_names]
     if remaining_groups:
         try:
             etf_universe = fetch_etf_and_index_universe()
@@ -102,7 +122,7 @@ def get_trusted_tickers_by_group(groups):
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y"):
-    defensive_and_regime = list(set(ASSET_GROUPS_MAPPING["All ETFs"] + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
+    defensive_and_regime = list(set(ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]))
     archive_based = momentum_data.get_prices_with_live_topup(tickers, extra_tickers=defensive_and_regime)
 
     if not archive_based.empty:
