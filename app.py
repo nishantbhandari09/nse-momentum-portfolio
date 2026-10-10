@@ -713,6 +713,15 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         # an exact historical Nifty 200 membership list.
         membership_target = "Nifty 500" if "Nifty 500" in selected_groups else "Nifty 200"
         membership_calendar = index_history_data.get_membership_calendar(membership_target)
+        nifty200_membership_is_approximate = (
+            membership_target == "Nifty 200" and membership_calendar.empty
+        )
+
+        # Nifty 200 is absent from the available reconstructed interval ledger.
+        # Use the stored Nifty 500 intervals as a broader fallback, and disclose
+        # that approximation rather than silently presenting it as exact Nifty 200 PIT.
+        if nifty200_membership_is_approximate:
+            membership_calendar = index_history_data.get_membership_calendar("Nifty 500")
 
         if membership_calendar.empty:
             try:
@@ -721,6 +730,21 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                     membership_calendar = legacy_membership[["symbol", "start", "end"]].copy()
             except Exception:
                 pass
+
+        if membership_calendar.empty:
+            st.error(
+                "Historical constituent membership could not be loaded. "
+                "The point-in-time backtest has been stopped rather than silently "
+                "using today's index constituents for past dates."
+            )
+            return None, None, None
+
+        if nifty200_membership_is_approximate:
+            st.warning(
+                "Nifty 200 point-in-time membership is not available in the stored source. "
+                "This run uses historical Nifty 500 membership as a broader proxy, so "
+                "results are approximate and may differ from a true Nifty 200 backtest."
+            )
 
         # Request price history for all historical members as well as the
         # 970-symbol archive and current index constituents. This enables
