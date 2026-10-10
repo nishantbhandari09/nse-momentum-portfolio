@@ -40,10 +40,15 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/index_prices data/index_membership_history.csv
+          git add data/index_prices data/index_membership_history.csv data/index_membership_snapshots
           if git diff --cached --quiet; then
             echo "No history changed; no commit needed."
           else
             git commit -m "Update stored historical Nifty index data"
-            git push
+            # Other app fixes may have reached main while a long initial backfill
+            # was running. Rebase the data commit before pushing so we never
+            # try to push an old checkout over newer application code.
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
           fi
