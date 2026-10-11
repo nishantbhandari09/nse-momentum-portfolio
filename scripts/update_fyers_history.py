@@ -471,7 +471,7 @@ def build_universe(master: pd.DataFrame):
             fyers_symbol = str(raw_symbol or "").strip().upper()
             if not fyers_symbol.startswith("NSE:"):
                 continue
-            name_match = bool(re.search(r"\\bETF\\b|BEES|EXCHANGE[\\s-]*TRADED[\\s-]*FUND", name, re.I))
+            name_match = bool(re.search(r"\bETF\b|BEES|EXCHANGE[\s-]*TRADED[\s-]*FUND", name, re.I))
             symbol_match = bool(re.search(r"ETF|BEES|LIQUIDCASE", fyers_symbol, re.I))
             if name_match or symbol_match:
                 ticker = normalize_app_ticker(fyers_symbol)
@@ -559,7 +559,12 @@ def main():
 
     max_requests = _env_int("FYERS_MAX_REQUESTS_PER_RUN", 4500)
     delay = _env_float("FYERS_REQUEST_DELAY_SECONDS", 1.25)
-    start_date = pd.Timestamp(os.getenv("FYERS_HISTORY_START_DATE", "1990-01-01")).date()
+    configured_start = os.getenv("FYERS_HISTORY_START_DATE", "").strip()
+    start_date = (
+        date.fromisoformat(configured_start)
+        if configured_start
+        else (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
+    )
     today = date.today()
     client = FyersHistoryClient(app_id, token, max_requests=max_requests, delay_seconds=delay)
 
@@ -570,6 +575,11 @@ def main():
     universe, priority = build_universe(master)
     print(f"Symbols queued: {len(universe)} (indices, current Nifty 500, ETF groups, historical members).")
     print(f"Daily history request budget: {max_requests}; request spacing: {delay:.2f}s; earliest requested date: {start_date}.")
+    print(
+        "FYERS history floor was explicitly configured by the repository variable."
+        if configured_start else
+        "No FYERS_HISTORY_START_DATE variable was set; using the rolling five-year floor compatible with Standard daily-history access. Set it to 1990-01-01 only if Prime history is enabled."
+    )
 
     stored_manifest = read_manifest()
     run_manifest = dict(stored_manifest)
