@@ -89,13 +89,13 @@ def extract_auth_code(redirected_url: str) -> str:
     return str(code).strip()
 
 
-def exchange_code_for_token(
+def exchange_code_for_tokens(
     client_id: str,
     secret_key: str,
     redirect_uri: str,
     auth_code: str,
-) -> str:
-    """Exchange the one-time OAuth code using FYERS' documented v3 REST contract.
+ ) -> dict[str, str]:
+    """Exchange the one-time OAuth code and return its access/refresh tokens.
 
     This intentionally avoids SDK response.json() assumptions so empty/non-JSON
     broker responses become useful error messages instead of JSONDecodeErrors.
@@ -139,7 +139,20 @@ def exchange_code_for_token(
             f"Response: {detail}. Verify that the App ID and Secret belong to the same "
             "activated FYERS app, the redirect URI matches exactly, and this is a fresh login."
         )
-    return str(data["access_token"])
+    return {
+        "access_token": str(data["access_token"]),
+        "refresh_token": str(data.get("refresh_token") or ""),
+    }
+
+
+def exchange_code_for_token(
+    client_id: str,
+    secret_key: str,
+    redirect_uri: str,
+    auth_code: str,
+) -> str:
+    """Backward-compatible helper returning only the access token."""
+    return exchange_code_for_tokens(client_id, secret_key, redirect_uri, auth_code)["access_token"]
 
 
 def get_authenticated_fyers(client_id: str, access_token: str):
