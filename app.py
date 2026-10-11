@@ -342,24 +342,10 @@ def render_fyers_connection_panel():
             connected_at = st.session_state.get("fyers_connected_at")
             if connected_at:
                 st.caption(f"Connected at {connected_at}")
-            refresh_token = str(st.session_state.get("fyers_refresh_token", "") or "")
-            if refresh_token:
-                with st.expander("Set up scheduled FYERS history updates"):
-                    st.caption(
-                        "Add the refresh token below to GitHub → repository Settings → Secrets and variables → "
-                        "Actions as FYERS_REFRESH_TOKEN. Treat it and your FYERS PIN as passwords. Do not paste "
-                        "either into code, issues, or chat."
-                    )
-                    if st.checkbox(
-                        "Reveal refresh token for copying to GitHub Actions Secrets",
-                        value=False,
-                        key="reveal_fyers_refresh_for_github",
-                    ):
-                        st.code(refresh_token, language="text")
-                    st.caption(
-                        "Also create Actions secrets FYERS_APP_ID, FYERS_SECRET_ID and FYERS_PIN. "
-                        "The refresh token is time-limited and may need replacement after it expires."
-                    )
+            st.caption(
+                "Historical downloads are triggered automatically after login once "
+                "GITHUB_ACTIONS_TOKEN has been configured in Streamlit Secrets. No FYERS PIN is required."
+            )
             if st.button("Disconnect FYERS"):
                 st.session_state.pop("fyers_access_token", None)
                 st.session_state.pop("fyers_refresh_token", None)
@@ -1108,8 +1094,9 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
         )
     else:
         st.warning(
-            "No FYERS history files are available in this deployment yet. The repository workflow must "
-            "download and commit the files before historical scans/backtests can run."
+            "No FYERS history files are available in this deployment yet. Connect to FYERS from this app "
+            "and configure GITHUB_ACTIONS_TOKEN in Streamlit Secrets once so the login-triggered workflow "
+            "can download and commit the historical files."
         )
     st.link_button(
         "Open FYERS Historical Data Workflow",
@@ -1152,7 +1139,7 @@ with st.expander("💾 Backups & Downloads"):
             st.warning(
                 "The FYERS historical OHLCV archive has not been downloaded to this deployment yet. "
                 "The scanner and backtester will not substitute Yahoo Finance prices. Configure the "
-                "GitHub Actions FYERS secrets and run the history updater workflow."
+                "connect to FYERS and configure GITHUB_ACTIONS_TOKEN in Streamlit Secrets once."
             )
 
 # ==========================================
