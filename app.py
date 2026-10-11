@@ -477,15 +477,12 @@ def _market_trend_is_bullish(strat, as_of_date=None):
         # Volatility Stop (ATR-based trailing stop). Above the stop = bullish.
         atr_period = int(strat.get("market_trend_vstop_atr_period", 10))
         multiplier = float(strat.get("market_trend_vstop_multiplier", 2.0))
-        # Use the checked-in official OHLC cache first. Yahoo remains a fallback
-        # until the initial backfill has completed or if an index file is missing.
+        # VStop uses only the persisted FYERS OHLC series. If the archive is
+        # missing, fail closed instead of substituting another price provider.
         ohlc = index_history_data.load_index_ohlc(ticker)
-        if not ohlc.empty:
-            ohlc = ohlc.set_index("Date")
-        else:
-            ohlc = yf.download(ticker, period="5y", interval="1d", auto_adjust=True, progress=False)
         if ohlc.empty:
             return False
+        ohlc = ohlc.set_index("Date")
         if isinstance(ohlc.columns, pd.MultiIndex):
             if "Close" in ohlc.columns.get_level_values(0):
                 close = ohlc["Close"][ticker] if ticker in ohlc["Close"].columns else ohlc["Close"].iloc[:, 0]
