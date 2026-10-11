@@ -399,6 +399,31 @@ def fetch_current_nifty500_symbols() -> list[str]:
     return []
 
 
+def refresh_membership_ledger() -> bool:
+    """Refresh point-in-time membership metadata; this is not a price source."""
+    path = ROOT / "data" / "index_membership_history.csv"
+    try:
+        response = requests.get(MEMBERSHIP_URL, timeout=45)
+        response.raise_for_status()
+        candidate = pd.read_csv(pd.io.common.StringIO(response.text), dtype=str)
+        required = {"index_name", "symbol", "valid_from", "valid_to"}
+        if len(candidate) < 1000 or not required.issubset(candidate.columns):
+            raise ValueError("Membership CSV did not pass structural checks.")
+        parsed_dates = pd.to_datetime(candidate["valid_from"], errors="coerce")
+        if parsed_dates.notna().sum() < 1000:
+            raise ValueError("Membership CSV contains too few valid interval dates.")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(response.text, encoding="utf-8")
+        print(
+            f"Membership metadata refreshed: {len(candidate)} intervals, "
+            f"{candidate['index_name'].nunique()} indices."
+        )
+        return True
+    except Exception as exc:
+        print(f"Membership metadata refresh skipped; retaining existing file if present: {exc}")
+        return path.exists()
+
+
 def load_membership_symbols() -> list[str]:
     symbols = set()
     candidates = [
@@ -520,6 +545,7 @@ def main():
     today = date.today()
     client = FyersHistoryClient(app_id, token, max_requests=max_requests, delay_seconds=delay)
 
+    refresh_membership_ledger()
     print("Reading current FYERS symbol master...")
     master = download_symbol_master()
     ticker_map = build_symbol_map(master)
