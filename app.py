@@ -779,72 +779,153 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         if relative_index_ticker not in tickers:
             tickers.append(relative_index_ticker)
 
+    # Keep pre-start prices for lookback indicators, but stop at the requested end.
+    # fetch_market_data reads only FYERS-stamped local price files.
     prices_df = fetch_market_data(tickers, period="5y", full_history=True)
-    prices_df = prices_df.loc[start_date:end_date]
-    if len(prices_df) < 252:
+    if prices_df is None or prices_df.empty:
+        return None, None, None
+    prices_df.index = pd.to_datetime(prices_df.index, errors="coerce").tz_localize(None).normalize()
+    prices_df = prices_df.loc[~prices_df.index.isna()].sort_index()
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    prices_df = prices_df.loc[:end_ts]
+    simulation_dates = prices_df.index[(prices_df.index >= start_ts) & (prices_df.index <= end_ts)]
+    if simulation_dates.empty:
         return None, None, None
 
-    try:
-        rebalance_dates = prices_df.resample('ME').first().index
-    except ValueError:
-        rebalance_dates = prices_df.resample('MS').first().index
+    # Require enough pre-start rows to calculate momentum, proximity, MA and RS
+    # signals without borrowing future values or starting with a warmed-up curve.
+    lookback_periods = [int(p) for p in strat_config.get("period_days", [252, 120, 60]) if int(p) > 0]
+    required_lookback = max(lookback_periods or [252])
+    ma_config = strat_config.get("moving_average", "200 EMA")
+    if ma_config != "None":
+        required_lookback = max(
+            required_lookback,
+            200 if "200" in ma_config else (100 if "100" in ma_config else 50),
+        )
+    if strat_config.get("pct_from_high", 15.0) > 0:
+        required_lookback = max(required_lookback, 252)
+    if strat_config.get("use_relative_momentum_filter", False):
+        required_lookback = max(
+            required_lookback,
+            int(strat_config.get("relative_momentum_ma_period", 200)),
+        )
+    required_lookback += int(strat_config.get("skip_days", 0)) + 2
+    previous_dates = prices_df.index[prices_df.index < simulation_dates[0]]
+    if len(previous_dates) < required_lookback:
+        return None, None, None
+
+    # Mark the portfolio to market every trading day. Momentum signals are
+    # computed using the previous session's close and changes take effect at
+    # the next session's close. This avoids trading on a close that was needed
+    # to calculate that same day's signal and lets MDD see intra-month declines.
+    frequency = str(strat_config.get("rebalance_freq", "Monthly")).strip().lower()
+    rebalance_day = max(1, min(28, int(strat_config.get("rebalance_day", 1))))
+    scheduled_dates = {simulation_dates[0]}
+
+    if frequency == "weekly":
+        period_keys = simulation_dates.to_period("W-FRI")
+        for key in period_keys.unique():
+            period_dates = simulation_dates[period_keys == key]
+            if len(period_dates):
+                scheduled_dates.add(period_dates[0])
+    elif frequency == "quarterly":
+        period_keys = simulation_dates.to_period("Q")
+        for key in period_keys.unique():
+            period_dates = simulation_dates[period_keys == key]
+            anchor_month = key.start_time.month
+            candidates = period_dates[
+                (period_dates.month == anchor_month) & (period_dates.day >= rebalance_day)
+            ]
+            if len(candidates):
+                scheduled_dates.add(candidates[0])
+    else:
+        period_keys = simulation_dates.to_period("M")
+        for key in period_keys.unique():
+            period_dates = simulation_dates[period_keys == key]
+            candidates = period_dates[period_dates.day >= rebalance_day]
+            if len(candidates):
+                scheduled_dates.add(candidates[0])
 
     portfolio_history = []
     holdings_history = []
-    current_cash = initial_capital
+    current_cash = float(initial_capital)
     current_holdings = {}
-    multiplier = strat_config.get("allocation_multiplier", 1.0)
+    multiplier = float(strat_config.get("allocation_multiplier", 1.0))
+    all_dates = prices_df.index
 
-    for i in range(len(rebalance_dates) - 1):
-        dt = rebalance_dates[i]
-        historical_sub_df = prices_df.loc[:dt]
-
-        if len(historical_sub_df) < 252:
-            continue
-
-        selected_stocks = run_strategy_stock_scanner(
-            strat_config, price_subset=historical_sub_df, current_holdings=list(current_holdings.keys()),
-            as_of_date=dt, membership_calendar=membership_calendar,
-        )
-        holdings_history.append((dt, list(selected_stocks)))
-
-        total_val = current_cash
+    for dt in simulation_dates:
+        close_row = prices_df.loc[dt]
+        # Daily valuation before trades: prior positions earn the close-to-close
+        # move up to this date. The same close is then used to execute today's
+        # target, which was generated from the prior session's data only.
+        daily_value = float(current_cash)
         for sym, qty in current_holdings.items():
-            if sym in historical_sub_df.columns:
-                total_val += qty * historical_sub_df[sym].iloc[-1]
+            price = close_row.get(sym, np.nan)
+            if pd.notna(price) and float(price) > 0:
+                daily_value += int(qty) * float(price)
 
-        if selected_stocks:
-            effective_pool = total_val * multiplier
-            alloc_per_stock = effective_pool / len(selected_stocks)
-            current_holdings = {}
-            current_cash = total_val
+        if dt in scheduled_dates:
+            prior = all_dates[all_dates < dt]
+            if len(prior):
+                signal_dt = prior[-1]
+                historical_sub_df = prices_df.loc[:signal_dt]
+                selected_stocks = run_strategy_stock_scanner(
+                    strat_config,
+                    price_subset=historical_sub_df,
+                    current_holdings=list(current_holdings.keys()),
+                    as_of_date=signal_dt,
+                    membership_calendar=membership_calendar,
+                )
+                holdings_history.append((dt, list(selected_stocks)))
 
-            for sym in selected_stocks:
-                if sym in historical_sub_df.columns:
-                    stk_price = historical_sub_df[sym].iloc[-1]
-                    if stk_price > 0:
-                        qty = int(alloc_per_stock // stk_price)
-                        if qty > 0:
-                            current_holdings[sym] = qty
-                            current_cash -= (qty * stk_price)
-        elif (
-            strat_config.get("use_market_trend_filter", False)
-            and strat_config.get("market_trend_exit_on_bearish", True)
-            and not _market_trend_is_bullish(strat_config, as_of_date=dt)
-        ):
-            # Sell all holdings into cash at this rebalance when the chosen
-            # index trend is bearish; the next bullish rebalance may re-enter.
-            current_holdings = {}
-            current_cash = total_val
+                if selected_stocks:
+                    # Never buy a symbol without a real FYERS close on the
+                    # execution date. If the target universe is temporarily
+                    # unpriceable, keep the existing portfolio instead.
+                    tradable = [
+                        sym for sym in selected_stocks
+                        if sym in prices_df.columns
+                        and pd.notna(close_row.get(sym, np.nan))
+                        and float(close_row.get(sym, 0.0)) > 0
+                    ]
+                    if tradable:
+                        current_cash = daily_value
+                        current_holdings = {}
+                        effective_pool = daily_value * multiplier
+                        allocation_per_stock = effective_pool / len(tradable)
+                        for sym in tradable:
+                            price = float(close_row[sym])
+                            qty = int(allocation_per_stock // price)
+                            if qty > 0:
+                                current_holdings[sym] = qty
+                                current_cash -= qty * price
+                elif (
+                    strat_config.get("use_market_trend_filter", False)
+                    and strat_config.get("market_trend_exit_on_bearish", True)
+                    and not _market_trend_is_bullish(strat_config, as_of_date=signal_dt)
+                ):
+                    current_holdings = {}
+                    current_cash = daily_value
 
-        portfolio_history.append({"Date": dt, "Portfolio Value": total_val})
+        # Re-value at today's close after any rebalance. Record every trading day,
+        # not only rebalance dates, so maximum drawdown and daily risk metrics
+        # are calculated from a daily equity curve.
+        marked_value = float(current_cash)
+        for sym, qty in current_holdings.items():
+            price = close_row.get(sym, np.nan)
+            if pd.notna(price) and float(price) > 0:
+                marked_value += int(qty) * float(price)
+        portfolio_history.append({"Date": dt, "Portfolio Value": marked_value})
 
     if not portfolio_history:
         return None, None, None
 
     df_res = pd.DataFrame(portfolio_history).set_index("Date")
+    df_res["Daily Return"] = df_res["Portfolio Value"].pct_change().fillna(0.0)
+    df_res["Peak Value"] = df_res["Portfolio Value"].cummax()
+    df_res["Drawdown"] = df_res["Portfolio Value"] / df_res["Peak Value"] - 1.0
     return df_res, holdings_history, prices_df
-
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
