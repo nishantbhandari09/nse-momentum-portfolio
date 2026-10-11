@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
@@ -94,7 +94,7 @@ def load_all_symbols() -> list[str]:
             if frame.empty:
                 continue
             stem = path.stem
-            symbols.append(f"{stem}.NS")
+            symbols.append(f"{unquote(stem)}.NS")
     try:
         import index_history_data
         for ticker in index_history_data.TICKER_TO_INDEX_NAME:
