@@ -1076,54 +1076,73 @@ if st.session_state.navigation_tab == "DASHBOARD":
         kpi6.metric("Total Portfolio Balance", f"₹{tot_portfolio_val:,.2f}")
 
         st.markdown("---")
-        st.subheader("Real Strategies")
+        real_names = [
+            name for name, strat in st.session_state.strategies.items()
+            if str(strat.get("type", "Virtual")).strip().lower() == "real"
+        ]
+        virtual_names = [
+            name for name, strat in st.session_state.strategies.items()
+            if str(strat.get("type", "Virtual")).strip().lower() != "real"
+        ]
 
-        strat_cols = st.columns(3)
-        keys = list(st.session_state.strategies.keys())
+        def render_strategy_cards(keys, empty_message):
+            if not keys:
+                st.info(empty_message)
+                return
 
-        for i, name in enumerate(keys):
-            strat = st.session_state.strategies[name]
-            sm = calculate_strategy_metrics(strat)
-            days_left = calculate_days_to_rebalance(strat.get("rebalance_day", 1))
-            col = strat_cols[i % 3]
+            strat_cols = st.columns(3)
+            for i, name in enumerate(keys):
+                strat = st.session_state.strategies[name]
+                sm = calculate_strategy_metrics(strat)
+                days_left = calculate_days_to_rebalance(strat.get("rebalance_day", 1))
+                col = strat_cols[i % 3]
 
-            with col:
-                with st.container(border=True):
-                    c_head1, c_head2 = st.columns([3, 2])
-                    with c_head1:
-                        st.markdown(f"### **{name}**")
-                        status_class = "status-active" if strat["status"] == "Active" else "status-paused"
-                        st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
+                with col:
+                    with st.container(border=True):
+                        c_head1, c_head2 = st.columns([3, 2])
+                        with c_head1:
+                            st.markdown(f"### **{name}**")
+                            status_class = "status-active" if strat["status"] == "Active" else "status-paused"
+                            st.markdown(f"<span class='{status_class}'>{strat['status']}</span>", unsafe_allow_html=True)
 
-                    with c_head2:
-                        act_col1, act_col2, act_col3 = st.columns(3)
-                        is_active = strat["status"] == "Active"
+                        with c_head2:
+                            act_col1, act_col2, act_col3 = st.columns(3)
+                            is_active = strat["status"] == "Active"
 
-                        if act_col1.button("⏸️" if is_active else "▶️", key=f"toggle_{name}", help="Start/Stop Strategy"):
-                            strat["status"] = "Paused" if is_active else "Active"
+                            if act_col1.button("⏸️" if is_active else "▶️", key=f"toggle_{name}", help="Start/Stop Strategy"):
+                                strat["status"] = "Paused" if is_active else "Active"
+                                st.rerun()
+
+                            if act_col2.button("✏️", key=f"edit_{name}", help="Edit Strategy Config"):
+                                st.session_state.editing_strategy_name = name
+                                st.session_state.navigation_tab = "STRATEGY_BUILDER"
+                                st.rerun()
+
+                            if act_col3.button("🗑️", key=f"del_{name}", help="Delete Strategy"):
+                                del st.session_state.strategies[name]
+                                st.rerun()
+
+                        st.caption(f"Groups: {', '.join(strat.get('groups', ['Nifty 500']))} | Multiplier: {strat.get('allocation_multiplier', 1.0)}x")
+                        st.caption(f"Rebalance Date: Day {strat.get('rebalance_day', 1)} | {days_left} days left")
+                        st.markdown(f"**Allocated:** ₹{sm['allocated']:,.2f}")
+                        st.markdown(f"**Realized P&L:** ₹{sm['realized_pnl']:,.2f}")
+                        st.markdown(f"**Unrealized P&L:** ₹{sm['unrealized_pnl']:,.2f}")
+
+                        pnl_color = "green" if sm['total_pnl'] >= 0 else "red"
+                        st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{sm['total_pnl']:,.2f} ({sm['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
+
+                        if st.button("🔍 Open Scanner & Details", key=f"view_detail_{name}", use_container_width=True):
+                            st.session_state.active_strategy_view = name
                             st.rerun()
 
-                        if act_col2.button("✏️", key=f"edit_{name}", help="Edit Strategy Config"):
-                            st.session_state.editing_strategy_name = name
-                            st.session_state.navigation_tab = "STRATEGY_BUILDER"
-                            st.rerun()
+        real_tab, virtual_tab = st.tabs(["💹 Real Strategies", "🧪 Virtual Strategies"])
+        with real_tab:
+            st.caption("Strategies categorized as Real. This section is separated from virtual/paper strategies.")
+            render_strategy_cards(real_names, "No real strategies yet. Create a strategy and set its type to Real.")
 
-                        if act_col3.button("🗑️", key=f"del_{name}", help="Delete Strategy"):
-                            del st.session_state.strategies[name]
-                            st.rerun()
-
-                    st.caption(f"Groups: {', '.join(strat.get('groups', ['Nifty 500']))} | Multiplier: {strat.get('allocation_multiplier', 1.0)}x")
-                    st.caption(f"Rebalance Date: Day {strat.get('rebalance_day', 1)} | {days_left} days left")
-                    st.markdown(f"**Allocated:** ₹{sm['allocated']:,.2f}")
-                    st.markdown(f"**Realized P&L:** ₹{sm['realized_pnl']:,.2f}")
-                    st.markdown(f"**Unrealized P&L:** ₹{sm['unrealized_pnl']:,.2f}")
-
-                    pnl_color = "green" if sm['total_pnl'] >= 0 else "red"
-                    st.markdown(f"**P&L / Returns:** <span style='color:{pnl_color}; font-weight:bold;'>₹{sm['total_pnl']:,.2f} ({sm['returns_pct']:.2f}%)</span>", unsafe_allow_html=True)
-
-                    if st.button("🔍 Open Scanner & Details", key=f"view_detail_{name}", use_container_width=True):
-                        st.session_state.active_strategy_view = name
-                        st.rerun()
+        with virtual_tab:
+            st.caption("Virtual strategies are for simulated portfolio tracking and do not place broker orders.")
+            render_strategy_cards(virtual_names, "No virtual strategies yet. Create a strategy and set its type to Virtual.")
 
 # ==========================================
 # PAGE 2: STRATEGY BUILDER & CONFIG
