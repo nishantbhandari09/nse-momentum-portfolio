@@ -71,7 +71,7 @@ INDEX_FALLBACK_SYMBOLS = {
 }
 INDEX_FILE_BY_TICKER = {
     ticker: index_history_data.INDEX_HISTORY_SPECS[name]["filename"]
-    for name, ticker in index_history_data.TICKER_TO_INDEX_NAME.items()
+    for ticker, name in index_history_data.TICKER_TO_INDEX_NAME.items()
 }
 
 OHLCV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "Source"]
