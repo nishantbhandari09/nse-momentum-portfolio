@@ -195,6 +195,40 @@ def trigger_fyers_history_update_on_login(access_token: str, app_id: str):
     uploaded as an Actions secret. It is never placed in a workflow input,
     repository file, log message or client payload.
     """
+    # This Streamlit app is publicly reachable, so only the intended FYERS
+    # account may update the repository's credentials and historical database.
+    allowed_user_id = str(st.secrets.get("FYERS_SYNC_ALLOWED_USER_ID") or "").strip().upper()
+    try:
+        profile_response = get_authenticated_fyers(app_id, access_token).get_profile()
+        profile_data = profile_response.get("data", {}) if isinstance(profile_response, dict) else {}
+        logged_in_user_id = str(
+            profile_data.get("fy_id")
+            or profile_data.get("fyId")
+            or profile_data.get("user_id")
+            or ""
+        ).strip().upper()
+    except Exception:
+        logged_in_user_id = ""
+
+    if not logged_in_user_id:
+        return (
+            False,
+            "FYERS login succeeded, but the app could not verify the logged-in FYERS account ID. "
+            "No historical update was started.",
+        )
+    if not allowed_user_id:
+        return (
+            False,
+            f"Your FYERS account ID is {logged_in_user_id}. Add it as FYERS_SYNC_ALLOWED_USER_ID "
+            "in Streamlit Secrets to authorize this account for automatic history updates, then log in again.",
+        )
+    if logged_in_user_id != allowed_user_id:
+        return (
+            False,
+            "FYERS is connected, but this account is not the one authorized to update the saved history. "
+            "No GitHub credentials were changed.",
+        )
+
     github_token = str(
         st.secrets.get("GITHUB_ACTIONS_TOKEN")
         or st.secrets.get("GITHUB_TOKEN")
@@ -203,7 +237,7 @@ def trigger_fyers_history_update_on_login(access_token: str, app_id: str):
     if not github_token:
         return (
             False,
-            "FYERS is connected, but automatic historical-data saving is not enabled yet. "
+            "Your FYERS account is verified, but automatic historical-data saving is not enabled yet. "
             "Add GITHUB_ACTIONS_TOKEN to Streamlit Secrets once; this setup does not require your FYERS PIN."
         )
 
