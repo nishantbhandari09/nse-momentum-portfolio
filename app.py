@@ -550,6 +550,14 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     has_equity_group = any(g in selected_groups for g in ("Nifty 500", "Nifty 200"))
     if candidate_tickers is not None:
         filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in candidate_tickers]]
+    elif has_equity_group and (membership_calendar is None or membership_calendar.empty):
+        # Without a usable PIT ledger, the documented fallback is today's chosen
+        # index universe applied historically—not every cached ticker/benchmark.
+        selected_assets = set(get_trusted_tickers_by_group(selected_groups))
+        selected_assets.update(get_selected_etf_tickers(selected_groups))
+        filtered_df = filtered_df.loc[:, [
+            c for c in filtered_df.columns if c in selected_assets
+        ]]
     elif not has_equity_group:
         selected_assets = get_selected_etf_tickers(selected_groups)
         filtered_df = filtered_df.loc[:, [
