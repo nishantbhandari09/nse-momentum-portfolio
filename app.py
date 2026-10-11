@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import requests
 import json
+import base64
+from nacl.public import PublicKey, SealedBox
 from io import StringIO
 from datetime import datetime, timedelta
 
@@ -186,6 +188,82 @@ def get_fyers_client():
     return get_authenticated_fyers(st.session_state["fyers_client_id"], st.session_state["fyers_access_token"])
 
 
+def trigger_fyers_history_update_on_login(access_token: str):
+    """Securely hand the fresh login token to GitHub Actions and start a history refresh.
+
+    The token is encrypted with GitHub's repository public key before it is
+    uploaded as an Actions secret. It is never placed in a workflow input,
+    repository file, log message or client payload.
+    """
+    github_token = str(
+        st.secrets.get("GITHUB_ACTIONS_TOKEN")
+        or st.secrets.get("GITHUB_TOKEN")
+        or ""
+    ).strip()
+    if not github_token:
+        return (
+            False,
+            "FYERS is connected, but automatic historical-data saving is not enabled yet. "
+            "Add GITHUB_ACTIONS_TOKEN to Streamlit Secrets once; this setup does not require your FYERS PIN."
+        )
+
+    owner, repo = "nishantbhandari09", "nse-momentum-portfolio"
+    api_root = f"https://api.github.com/repos/{owner}/{repo}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {github_token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        key_response = requests.get(
+            f"{api_root}/actions/secrets/public-key",
+            headers=headers,
+            timeout=20,
+        )
+        key_response.raise_for_status()
+        key_data = key_response.json()
+        public_key = PublicKey(base64.b64decode(key_data["key"]))
+        encrypted_value = base64.b64encode(
+            SealedBox(public_key).encrypt(str(access_token).encode("utf-8"))
+        ).decode("ascii")
+
+        secret_response = requests.put(
+            f"{api_root}/actions/secrets/FYERS_ACCESS_TOKEN",
+            headers=headers,
+            json={
+                "encrypted_value": encrypted_value,
+                "key_id": key_data["key_id"],
+            },
+            timeout=20,
+        )
+        secret_response.raise_for_status()
+
+        dispatch_response = requests.post(
+            f"{api_root}/dispatches",
+            headers=headers,
+            json={
+                "event_type": "fyers-login",
+                "client_payload": {"source": "streamlit-login"},
+            },
+            timeout=20,
+        )
+        dispatch_response.raise_for_status()
+        return (
+            True,
+            "Historical-data refresh has been triggered in GitHub Actions using this login. "
+            "The workflow will save its progress back to the repository when finished.",
+        )
+    except Exception as exc:
+        # Do not surface request bodies or any credential values in the app.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        detail = f"GitHub returned HTTP {status}." if status else "The GitHub request could not be completed."
+        return (
+            False,
+            "FYERS login succeeded, but automatic historical-data refresh could not be started. "
+            f"{detail} Check that GITHUB_ACTIONS_TOKEN has repository Secrets read/write and Contents write permission.",
+        )
+
+
 def render_fyers_connection_panel():
     # The OAuth callback returns to this same Streamlit URL. Capture the code
     # directly from query parameters and exchange it automatically. The user
@@ -220,6 +298,13 @@ def render_fyers_connection_panel():
                 st.session_state["fyers_refresh_token"] = token_bundle["refresh_token"]
             st.session_state["fyers_client_id"] = app_id
             st.session_state["fyers_connected_at"] = datetime.now().isoformat(timespec="seconds")
+            update_ok, update_message = trigger_fyers_history_update_on_login(
+                token_bundle["access_token"]
+            )
+            st.session_state["_fyers_history_update_status"] = {
+                "ok": update_ok,
+                "message": update_message,
+            }
             st.query_params.clear()
             st.rerun()
         except FyersLoginError as e:
@@ -231,7 +316,23 @@ def render_fyers_connection_panel():
 
     with st.expander("🔌 FYERS Connection", expanded="fyers_access_token" not in st.session_state):
         if "fyers_access_token" in st.session_state:
-            st.success("Connected to FYERS for this session.")
+            st.success("Connected to FYERS for this session. Live quotes are fetched from this session when you scan or value holdings.")
+            update_status = st.session_state.get("_fyers_history_update_status")
+            if update_status:
+                if update_status.get("ok"):
+                    st.success(update_status.get("message", "Historical-data refresh triggered."))
+                else:
+                    st.warning(update_status.get("message", "Automatic historical-data refresh is not configured."))
+            if not (
+                st.secrets.get("GITHUB_ACTIONS_TOKEN")
+                or st.secrets.get("GITHUB_TOKEN")
+            ):
+                st.info(
+                    "One-time setup for saved history: add a fine-grained GitHub token as "
+                    "GITHUB_ACTIONS_TOKEN in Streamlit Secrets, limited to this repository with "
+                    "Secrets read/write and Contents write. After that, each FYERS login will "
+                    "automatically trigger a history refresh. Your FYERS PIN is not needed."
+                )
             connected_at = st.session_state.get("fyers_connected_at")
             if connected_at:
                 st.caption(f"Connected at {connected_at}")
