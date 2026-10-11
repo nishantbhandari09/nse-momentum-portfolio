@@ -1,9 +1,9 @@
-"""Persistent historical Nifty index price and point-in-time membership readers.
+"""Read persistent FYERS-sourced Nifty index OHLCV and point-in-time membership.
 
-Index OHLC data is seeded and refreshed by the GitHub Actions workflow.
-Membership intervals are sourced from the CC BY 4.0 dataset documented in
-data/INDEX_DATA_SOURCES.md. Membership history is reconstructed and has coverage
-limitations, especially before 2018; it is not an official complete historical file.
+Index prices are written by scripts/update_fyers_history.py using FYERS API v3.
+Legacy index CSVs without the explicit FYERS source marker are ignored, so the
+backtest will not silently mix price vendors. Membership intervals remain a
+separate reconstructed dataset with the caveats in data/INDEX_DATA_SOURCES.md.
 """
 from pathlib import Path
 from io import StringIO
@@ -80,7 +80,7 @@ def _normalise_ohlc_frame(frame):
 
     result = pd.DataFrame()
     result["Date"] = pd.to_datetime(frame[date_col], errors="coerce", dayfirst=True)
-    for target in ("Open", "High", "Low", "Close"):
+    for target in ("Open", "High", "Low", "Close", "Volume"):
         col = lookup.get(target.lower())
         result[target] = pd.to_numeric(
             frame[col].astype(str).str.replace(",", "", regex=False), errors="coerce"
@@ -99,9 +99,15 @@ def load_index_ohlc(ticker):
     if not path.exists():
         return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close"])
     try:
-        return _normalise_ohlc_frame(pd.read_csv(path))
+        raw = pd.read_csv(path)
+        if "Source" not in raw.columns:
+            return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        source = raw["Source"].fillna("").astype(str).str.strip().str.upper()
+        if not source.eq("FYERS API").all():
+            return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        return _normalise_ohlc_frame(raw)
     except (OSError, ValueError, pd.errors.ParserError):
-        return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close"])
+        return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
 
 
 def load_index_close_prices():
