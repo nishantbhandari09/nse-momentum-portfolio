@@ -559,13 +559,13 @@ def main():
 
     max_requests = _env_int("FYERS_MAX_REQUESTS_PER_RUN", 4500)
     delay = _env_float("FYERS_REQUEST_DELAY_SECONDS", 1.25)
+    today = date.today()
     configured_start = os.getenv("FYERS_HISTORY_START_DATE", "").strip()
     start_date = (
         date.fromisoformat(configured_start)
         if configured_start
         else (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
     )
-    today = date.today()
     client = FyersHistoryClient(app_id, token, max_requests=max_requests, delay_seconds=delay)
 
     refresh_membership_ledger()
