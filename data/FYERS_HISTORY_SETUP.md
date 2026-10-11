@@ -18,7 +18,7 @@ The FYERS login in Streamlit and GitHub Actions are separate. A token in Streaml
 1. Open the Streamlit app and complete a fresh login through **FYERS Connection**.
 2. Expand **Set up scheduled FYERS history updates** and tick the checkbox to reveal the refresh token. Copy it privately.
 3. On GitHub, open this repository → **Settings → Secrets and variables → Actions → New repository secret**.
-4. Add these Actions secrets:
+4. Before running, open your FYERS API app settings and ensure **Market Data → Historical** permission is enabled. Then add these Actions secrets:
 
 | Secret | Value |
 |---|---|
@@ -31,7 +31,7 @@ Never put tokens, the app secret or the PIN in code, commits, issues, or chat. I
 
 After saving secrets, open **Actions → Update FYERS Historical Price Database → Run workflow**. It also runs on weekdays after market close. If credentials are missing, the workflow deliberately skips downloading instead of fetching prices from another provider.
 
-FYERS currently documents refresh tokens as valid for 15 days. Scheduled history refresh may therefore require periodically completing a fresh FYERS login and replacing `FYERS_REFRESH_TOKEN` in GitHub Actions Secrets. Treat that as a credential-maintenance requirement, not an automatic guarantee.
+FYERS currently documents refresh tokens as valid for 15 days, and its developer reference warns that the refresh-token flow may be discontinued. Scheduled history refresh may therefore require periodically completing a fresh FYERS login and replacing `FYERS_REFRESH_TOKEN` in GitHub Actions Secrets. Treat that as a credential-maintenance requirement, not an automatic guarantee. The updater will stop visibly on an authentication error rather than switch to another price vendor.
 
 ## FYERS history limits and backfill speed
 
