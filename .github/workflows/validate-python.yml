@@ -24,6 +24,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install minimal import-check dependencies
+        run: python -m pip install --upgrade pip pandas requests
+
       - name: Compile application and supporting modules
         run: |
           python -m py_compile app.py fyers_auth.py fyers_history_data.py momentum_data.py index_history_data.py index_constituents.py etf_index_universe.py etf_group_universe.py
