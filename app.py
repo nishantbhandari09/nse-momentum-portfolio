@@ -543,10 +543,18 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
 
-    # For a live scan, use only the selected main group as the stock universe.
-    # The benchmark is fetched separately and must never be ranked as a stock.
-    if use_relative_momentum and candidate_tickers is not None:
+    # Backtest calls pass a historical price matrix that also contains benchmark
+    # indices and always-fetched overlays. Keep ETF-only backtests inside the
+    # exact selected ETF groups; equity universes are filtered by point-in-time
+    # membership below. Neither benchmarks nor unselected ETFs are candidates.
+    has_equity_group = any(g in selected_groups for g in ("Nifty 500", "Nifty 200"))
+    if candidate_tickers is not None:
         filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in candidate_tickers]]
+    elif not has_equity_group:
+        selected_assets = get_selected_etf_tickers(selected_groups)
+        filtered_df = filtered_df.loc[:, [
+            c for c in filtered_df.columns if c in selected_assets
+        ]]
 
     trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
@@ -630,10 +638,23 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
 
     if as_of_date is not None and membership_calendar is not None and not membership_calendar.empty:
         selected_etf_tickers = get_selected_etf_tickers(selected_groups)
+        # A historical price matrix includes indices and every cached ETF. Only
+        # instruments explicitly selected by the strategy, or symbols represented
+        # in this index's membership ledger and active on the signal date, may rank.
+        membership_symbols = {
+            str(symbol).strip().upper()
+            for symbol in membership_calendar["symbol"].dropna().tolist()
+        }
         eligible_cols = [
             c for c in filtered_df.columns
-            if c in selected_etf_tickers
-            or momentum_data.was_member(c, as_of_date, membership_calendar)
+            if not c.startswith("^")
+            and (
+                c in selected_etf_tickers
+                or (
+                    c.upper() in membership_symbols
+                    and momentum_data.was_member(c, as_of_date, membership_calendar)
+                )
+            )
         ]
         filtered_df = filtered_df[eligible_cols]
 
