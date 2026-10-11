@@ -77,7 +77,7 @@ INDEX_FILE_BY_TICKER = {
 OHLCV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "Source"]
 MANIFEST_COLUMNS = [
     "App Ticker", "FYERS Symbol", "Asset Type", "First Date", "Last Date",
-    "Rows", "Backfill Complete", "Last Updated", "Status", "Message",
+    "Rows", "Backfill Complete", "Next Backfill End", "Last Updated", "Status", "Message",
 ]
 
 
@@ -498,7 +498,8 @@ def read_manifest() -> dict[str, dict]:
 
 
 def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.DataFrame,
-                 backfill_complete: bool, status: str, message: str = "") -> dict:
+                 backfill_complete: bool, status: str, message: str = "",
+                 next_backfill_end: str = "") -> dict:
     if frame is None or frame.empty:
         first = last = ""
         rows = 0
@@ -515,6 +516,7 @@ def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.Data
         "Last Date": last,
         "Rows": rows,
         "Backfill Complete": bool(backfill_complete),
+        "Next Backfill End": str(next_backfill_end or ""),
         "Last Updated": datetime.now().isoformat(timespec="seconds"),
         "Status": status,
         "Message": str(message)[:500],
@@ -627,12 +629,29 @@ def main():
             pending_retries.append(ticker)
             continue
         if outcome == "empty":
-            # For an existing file, a recent empty response could be a temporary
-            # API/source issue: keep its existing data and retry the next day.
+            # Historical members may have been delisted years ago, so their
+            # latest 365-day window can be empty even when older candles exist.
+            # Persist a cursor and search older windows before declaring no history.
             if old.empty:
-                run_manifest[ticker] = manifest_row(ticker, fyers_symbol, asset_type_for(ticker), old, True, "no history", message or "No FYERS daily candles returned.")
+                if recent_start <= start_date:
+                    run_manifest[ticker] = manifest_row(
+                        ticker, fyers_symbol, asset_type_for(ticker), old, True,
+                        "no history", message or "No FYERS daily candles returned at the configured history floor.",
+                    )
+                else:
+                    cursor = recent_start - timedelta(days=1)
+                    run_manifest[ticker] = manifest_row(
+                        ticker, fyers_symbol, asset_type_for(ticker), old, False,
+                        "search older history",
+                        message or "No candles in the recent window; continuing backward to find older listed history.",
+                        next_backfill_end=cursor.isoformat(),
+                    )
             else:
-                run_manifest[ticker] = manifest_row(ticker, fyers_symbol, asset_type_for(ticker), old, complete, "retry", message or "No recent candles returned; existing data retained.")
+                run_manifest[ticker] = manifest_row(
+                    ticker, fyers_symbol, asset_type_for(ticker), old, complete,
+                    "retry", message or "No recent candles returned; existing data retained.",
+                    next_backfill_end=str(previous.get("Next Backfill End", "") or ""),
+                )
                 pending_retries.append(ticker)
             continue
         local_frames[ticker] = merge_and_write(ticker, old, new)
@@ -648,16 +667,22 @@ def main():
 
     # Phase 2: backfill older history fairly, one <=366-day chunk per symbol per
     # pass. Re-running the workflow resumes from each file's earliest stored date.
+    backfill_failed_this_run = set()
     while client.request_count < max_requests:
         pass_progress = False
         candidates = []
         for ticker in universe:
             frame = get_frame(ticker)
             entry = run_manifest.get(ticker, {})
-            if frame.empty:
+            if ticker in backfill_failed_this_run:
                 continue
             complete = str(entry.get("Backfill Complete", "")).lower() in {"true", "1", "yes"}
             if complete:
+                continue
+            if frame.empty:
+                cursor = str(entry.get("Next Backfill End", "") or "").strip()
+                if cursor:
+                    candidates.append(ticker)
                 continue
             first_date = pd.to_datetime(frame["Date"], errors="coerce").min().date()
             if first_date <= start_date:
@@ -675,8 +700,15 @@ def main():
                 stop_reason = "request budget reached during historical backfill"
                 break
             frame = get_frame(ticker)
-            first_date = pd.to_datetime(frame["Date"], errors="coerce").min().date()
-            to_date = first_date - timedelta(days=1)
+            entry = run_manifest.get(ticker, {})
+            if frame.empty:
+                cursor_text = str(entry.get("Next Backfill End", "") or "").strip()
+                if not cursor_text:
+                    continue
+                to_date = date.fromisoformat(cursor_text)
+            else:
+                first_date = pd.to_datetime(frame["Date"], errors="coerce").min().date()
+                to_date = first_date - timedelta(days=1)
             from_date = max(start_date, to_date - timedelta(days=365))
             try:
                 older, outcome, message = process_request(ticker, from_date, to_date)
@@ -688,18 +720,35 @@ def main():
                 break
             if outcome == "error":
                 failures.append({"App Ticker": ticker, "FYERS Symbol": ticker_to_api[ticker], "Stage": "backfill", "Message": message})
-                current = run_manifest.get(ticker, {})
+                backfill_failed_this_run.add(ticker)
                 run_manifest[ticker] = manifest_row(
                     ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
                     False, "retry", message,
+                    next_backfill_end=str(entry.get("Next Backfill End", "") or ""),
                 )
                 continue
             if outcome == "empty":
-                run_manifest[ticker] = manifest_row(
-                    ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
-                    True, "oldest available", message or "No older FYERS candles in this window.",
-                )
-                pass_progress = True
+                if frame.empty:
+                    if from_date <= start_date:
+                        run_manifest[ticker] = manifest_row(
+                            ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
+                            True, "no history", message or "No older candles available at the configured floor.",
+                        )
+                    else:
+                        next_cursor = from_date - timedelta(days=1)
+                        run_manifest[ticker] = manifest_row(
+                            ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
+                            False, "search older history",
+                            f"No candles from {from_date} to {to_date}; will search earlier history. {message}".strip(),
+                            next_backfill_end=next_cursor.isoformat(),
+                        )
+                    pass_progress = True
+                else:
+                    run_manifest[ticker] = manifest_row(
+                        ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
+                        True, "oldest available", message or "No older FYERS candles in this window.",
+                    )
+                    pass_progress = True
                 continue
             merged = merge_and_write(ticker, frame, older)
             local_frames[ticker] = merged
