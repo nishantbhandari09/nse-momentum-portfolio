@@ -59,4 +59,4 @@ Historical index membership is separate from price data. `data/index_membership_
 
 ## Inspect progress
 
-Open **Actions → Update FYERS Historical Price Database** and inspect the run logs. In the app, expand **FYERS Historical Data Status** to see symbol count, candle count, oldest/newest saved dates and pending backfills. A successful code validation only checks Python syntax; the first real download is not complete until the workflow has been run with valid FYERS credentials and its manifest shows populated rows.
+Open **Actions → Update FYERS Historical Price Database** and inspect the run logs. In the app, expand **FYERS Historical Data Status** to see symbol count, candle count, oldest/newest saved dates and pending backfills. A successful code validation only checks Python syntax; the first real download is not complete until a login-triggered workflow run succeeds and its manifest shows populated rows. The FYERS API app must permit profile lookup so the app can verify the authorized account ID before triggering the update.
