@@ -368,10 +368,11 @@ def render_fyers_connection_panel():
                 or st.secrets.get("GITHUB_TOKEN")
             ):
                 st.info(
-                    "One-time setup for saved history: add a fine-grained GitHub token as "
-                    "GITHUB_ACTIONS_TOKEN in Streamlit Secrets, limited to this repository with "
-                    "Secrets read/write and Contents write. After that, each FYERS login will "
-                    "automatically trigger a history refresh. Your FYERS PIN is not needed."
+                    "One-time setup for saved history: add GITHUB_ACTIONS_TOKEN in Streamlit Secrets "
+                    "using a fine-grained token limited to this repository (Secrets read/write and Contents "
+                    "read/write). Also set FYERS_SYNC_ALLOWED_USER_ID to the verified FYERS account ID shown "
+                    "after your first login. After setup, each login from that account triggers a history "
+                    "refresh; your FYERS PIN is not needed."
                 )
             connected_at = st.session_state.get("fyers_connected_at")
             if connected_at:
