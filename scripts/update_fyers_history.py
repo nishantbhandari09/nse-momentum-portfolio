@@ -69,6 +69,12 @@ INDEX_FALLBACK_SYMBOLS = {
     "^CNXFMCG": "NSE:NIFTYFMCG-INDEX",
     "^CNXMETAL": "NSE:NIFTYMETAL-INDEX",
 }
+# The app always loads these liquid/defensive overlays even when a strategy
+# selects only equities. Include them in the same persistent FYERS cache.
+ALWAYS_FETCH_TICKERS = [
+    "GOLDBEES.NS", "LIQUIDBEES.NS", "SETFGSEC.NS",
+    "NIFTYBEES.NS", "JUNIORBEES.NS", "BANKBEES.NS",
+]
 INDEX_FILE_BY_TICKER = {
     ticker: index_history_data.INDEX_HISTORY_SPECS[name]["filename"]
     for ticker, name in index_history_data.TICKER_TO_INDEX_NAME.items()
@@ -462,6 +468,10 @@ def build_universe(master: pd.DataFrame):
             ticker = normalize_app_ticker(symbol)
             if ticker:
                 etfs.add(ticker)
+    for symbol in ALWAYS_FETCH_TICKERS:
+        ticker = normalize_app_ticker(symbol)
+        if ticker:
+            etfs.add(ticker)
 
     # Include every ETF/BEES entry present in FYERS' current symbol master, not
     # only the user's curated ETF groups. The public master is refreshed daily.
