@@ -51,12 +51,12 @@ jobs:
           FYERS_REQUEST_DELAY_SECONDS: ${{ vars.FYERS_REQUEST_DELAY_SECONDS || '1.25' }}
         run: |
           if [ -z "$FYERS_APP_ID" ]; then
-            echo "::notice::Historical refresh skipped. Add FYERS_APP_ID and FYERS credentials under Settings > Secrets and variables > Actions."
-            exit 0
+            echo "::error::FYERS history was NOT downloaded. Add FYERS_APP_ID and the required FYERS credentials under Settings > Secrets and variables > Actions."
+            exit 1
           fi
           if [ -z "$FYERS_ACCESS_TOKEN" ] && { [ -z "$FYERS_REFRESH_TOKEN" ] || [ -z "$FYERS_SECRET_ID" ] || [ -z "$FYERS_PIN" ]; }; then
-            echo "::notice::Historical refresh skipped. Configure either FYERS_ACCESS_TOKEN, or FYERS_SECRET_ID + FYERS_REFRESH_TOKEN + FYERS_PIN."
-            exit 0
+            echo "::error::FYERS history was NOT downloaded. Configure either FYERS_ACCESS_TOKEN, or FYERS_SECRET_ID + FYERS_REFRESH_TOKEN + FYERS_PIN."
+            exit 1
           fi
           python scripts/update_fyers_history.py
 
