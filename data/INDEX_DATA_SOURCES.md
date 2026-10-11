@@ -1,28 +1,27 @@
 # Historical market data sources and limitations
 
-## Index price history
+## Price history
 
-The files under data/index_prices/ are daily OHLC series for major Nifty indices, retrieved from the Nifty Indices historical-data service. The scheduled GitHub Actions workflow backfills the available history and then refreshes recent sessions after the Indian cash-market close. It deliberately overlaps the latest 14 calendar days when refreshing and deduplicates rows by date.
+The app's scanner and backtester use daily price files stamped `FYERS API`. The scheduled workflow uses FYERS API v3 History (`/data/history`, daily resolution) and stores the returned OHLCV values in `data/fyers_history/` for equities/ETFs and `data/index_prices/` for the nine index tickers used by the app. Repeated runs refresh recent dates, deduplicate by date, and backfill older data in 366-calendar-day chunks.
 
-Source portal: https://www.niftyindices.com/reports/historical-data  
-Downloader reference: https://github.com/jugaad-py/jugaad-data
+See [FYERS history setup, credentials, rate limits and backtest caveats](FYERS_HISTORY_SETUP.md). The history updater requires GitHub Actions Secrets to be configured separately from Streamlit Secrets; without credentials it skips rather than using another vendor.
 
-## Historical index membership
-
-data/index_membership_history.csv is sourced from the open-source project aditya-jha/nse-historical-membership, which reconstructs membership intervals from public NSE/Nifty Indices press releases and circulars.
-
-Attribution: "NSE press releases / NSE Exchange circulars (publicly published)" and https://github.com/aditya-jha/nse-historical-membership. The upstream CSV is licensed CC BY 4.0; see https://github.com/aditya-jha/nse-historical-membership/blob/main/LICENSE-DATA.
-
-**Important data-quality limitation:** this is reconstructed point-in-time membership, not a certified official daily constituent archive. Upstream documents reliable coverage mainly from April 2018 onward for several major indices and known cardinality drift / incomplete replacement events before 2018. Some indices begin later. The backtester uses the dates provided and must not be described as completely survivorship-bias-free for every index/date.
+Official API references:
+- FYERS data/history endpoint and candle format: https://github.com/FyersDev/fyers-skills/blob/master/skills/fyers-trading/references/market-data.md
+- FYERS Standard/Prime history range and API limits: https://support.fyers.in/portal/en/kb/articles/what-are-the-fyers-api-rate-limits-for-standard-and-prime-plans
 
 ## Historical index membership
 
-The checked-in file data/index_membership_history.csv is sourced from the open-source project aditya-jha/nse-historical-membership, which reconstructs membership intervals from public NSE/Nifty Indices press releases and circulars.
+`data/index_membership_history.csv` is a reconstructed constituent-membership ledger from the open-source project aditya-jha/nse-historical-membership. Membership is separate from the price source; FYERS candles do not provide the dates when historical index constituents entered or left an index.
 
-Attribution: "NSE press releases / NSE Exchange circulars (publicly published)" and https://github.com/aditya-jha/nse-historical-membership. The upstream CSV is licensed CC BY 4.0; see https://github.com/aditya-jha/nse-historical-membership/blob/main/LICENSE-DATA.
+Attribution: "NSE press releases / NSE Exchange circulars (publicly published)" and https://github.com/aditya-jha/nse-historical-membership. The upstream membership CSV is licensed CC BY 4.0; see https://github.com/aditya-jha/nse-historical-membership/blob/main/LICENSE-DATA.
 
-**Important data-quality limitation:** this is reconstructed point-in-time membership, not a certified official daily constituent archive. Upstream documents reliable coverage mainly from April 2018 onward for several major indices and known cardinality drift / incomplete replacement events before 2018. The app uses this interval ledger for Nifty 500. The source does not provide an exact Nifty 200 membership series; Nifty 200 backtests currently fall back to the broader Nifty 500 membership calendar, so those results are approximate and should not be described as fully survivorship-bias-free.
+**Important limitation:** membership is reconstructed, not a certified complete official daily constituent ledger. Upstream documents stronger coverage mainly from April 2018 onward for several indices, with incomplete replacements/cardinality drift before 2018. Exact Nifty 200 membership history is not provided by this source; Nifty 200 backtests may use the broader Nifty 500 membership calendar. Point-in-time backtests can still have survivorship bias.
 
-## Storage model
+## Interpreting returns and maximum drawdown
 
-Price and membership CSVs are committed to this repository; they are not dependent on Streamlit's ephemeral runtime filesystem. GitHub Actions appends/repairs market-data history on a weekday schedule. If the workflow is disabled or fails for an extended period, open the repository's Actions tab and manually run Update Historical Nifty Index Data.
+FYERS OHLCV rows are kept as returned by the History API. Do not assume that these candles are split/bonus/dividend-adjusted total-return series without verifying FYERS' adjustment conventions. The current backtester does not automatically credit dividend cashflows or subtract transaction costs, taxes, slippage or market impact. Those limitations can materially affect returns, CAGR and maximum drawdown.
+
+## Data integrity behavior
+
+The price readers require a `Source` column containing `FYERS API`, preventing older NSE/Yahoo files or external price archives from being silently mixed into a FYERS backtest. The manifest at `data/fyers_history_manifest.csv` records symbol mapping, oldest/newest stored dates, row counts and backfill statuses; failed API requests are listed in `data/fyers_history_failures.csv`.
