@@ -60,7 +60,8 @@ jobs:
           fi
           python scripts/update_fyers_history.py
 
-      - name: Commit updated FYERS history
+      - name: Commit any saved FYERS history progress
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
