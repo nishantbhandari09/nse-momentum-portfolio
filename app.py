@@ -1048,6 +1048,9 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
     else:
         st.title("MY PORTFOLIO")
+        save_notice = st.session_state.pop("strategy_save_notice", None)
+        if save_notice:
+            st.success(save_notice)
 
         tot_allocated = 0.0
         tot_holding_val = 0.0
@@ -1342,72 +1345,102 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     st.markdown("---")
     save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
     if st.button(save_label, type="primary", use_container_width=True):
-        selected_groups = []
-        if grp_nifty500: selected_groups.append("Nifty 500")
-        if grp_nifty200: selected_groups.append("Nifty 200")
-        if grp_all_etfs: selected_groups.append("All ETFs")
-        if grp_gold_etf: selected_groups.append("Gold ETF")
-        if grp_liquidbees: selected_groups.append("LiquidBEES")
-        if grp_gov_bond: selected_groups.append("Gov Bond")
-        selected_groups.extend(selected_etf_categories)
-        selected_groups.extend(selected_uploaded_etf_groups)
-        selected_groups = list(dict.fromkeys(selected_groups))
+        # Validate first, then update session state in one step. This avoids
+        # leaving a half-written strategy if any input is invalid.
+        target_name = (
+            str(st.session_state.editing_strategy_name or "").strip()
+            if edit_mode else str(strat_name_input or "").strip()
+        )
 
-        selected_periods = []
-        weights = []
-        if p252:
-            selected_periods.append(252)
-            weights.append(0.4)
-        if p120:
-            selected_periods.append(120)
-            weights.append(0.3)
-        if p90:
-            selected_periods.append(90)
-            weights.append(0.2)
-        if p60:
-            selected_periods.append(60)
-            weights.append(0.1)
+        try:
+            if not target_name:
+                raise ValueError("Please enter a name for this strategy.")
+            if not edit_mode and target_name in st.session_state.strategies:
+                raise ValueError(
+                    f"A strategy named '{target_name}' already exists. Choose a different name."
+                )
+            if float(tot_alloc) <= 0:
+                raise ValueError("Allocated capital must be greater than ₹0.")
 
-        target_name = st.session_state.editing_strategy_name if edit_mode else strat_name_input
+            selected_groups = []
+            if grp_nifty500: selected_groups.append("Nifty 500")
+            if grp_nifty200: selected_groups.append("Nifty 200")
+            if grp_all_etfs: selected_groups.append("All ETFs")
+            if grp_gold_etf: selected_groups.append("Gold ETF")
+            if grp_liquidbees: selected_groups.append("LiquidBEES")
+            if grp_gov_bond: selected_groups.append("Gov Bond")
+            selected_groups.extend(selected_etf_categories)
+            selected_groups.extend(selected_uploaded_etf_groups)
+            selected_groups = list(dict.fromkeys(selected_groups))
+            if not selected_groups:
+                selected_groups = ["Nifty 500"]
 
-        st.session_state.strategies[target_name] = {
-            "created_date": edit_strat.get("created_date", datetime.now().strftime("%Y-%m-%d")),
-            "status": edit_strat.get("status", "Active"),
-            "type": st_type,
-            "allocated": float(tot_alloc),
-            "realized_pnl": edit_strat.get("realized_pnl", 0.0),
-            "rebalance_freq": rebal_freq,
-            "rebalance_day": rebal_day,
-            "groups": selected_groups if selected_groups else ["Nifty 500"],
-            "allocation_multiplier": float(alloc_multiplier),
-            "entry_rank": entry_rank,
-            "exit_rank": exit_rank,
-            "period_days": selected_periods if selected_periods else [252],
-            "period_weights": weights if weights else [1.0],
-            "pct_from_high": pct_high,
-            "pct_from_low": pct_low,
-            "moving_average": selected_ma,
-            "use_rs": use_rs,
-            "rs_benchmark": rs_benchmark,
-            "min_price": float(min_price),
-            "use_relative_momentum_filter": bool(use_relative_momentum),
-            "relative_momentum_index": relative_momentum_index,
-            "relative_momentum_ma_type": relative_momentum_ma_type,
-            "relative_momentum_ma_period": int(relative_momentum_ma_period),
-            "use_market_trend_filter": bool(use_market_trend),
-            "market_trend_index": trend_index,
-            "market_trend_indicator": trend_indicator,
-            "market_trend_ma_type": trend_ma_type,
-            "market_trend_ma_period": int(trend_ma_period),
-            "market_trend_vstop_atr_period": int(trend_vstop_atr),
-            "market_trend_vstop_multiplier": float(trend_vstop_multiplier),
-            "market_trend_exit_on_bearish": bool(market_trend_exit_on_bearish),
-            "positions": edit_strat.get("positions", [])
-        }
+            selected_periods = []
+            weights = []
+            if p252:
+                selected_periods.append(252)
+                weights.append(0.4)
+            if p120:
+                selected_periods.append(120)
+                weights.append(0.3)
+            if p90:
+                selected_periods.append(90)
+                weights.append(0.2)
+            if p60:
+                selected_periods.append(60)
+                weights.append(0.1)
+            if not selected_periods:
+                selected_periods, weights = [252], [1.0]
+            else:
+                total_weight = sum(weights)
+                weights = [weight / total_weight for weight in weights]
 
-        st.session_state.editing_strategy_name = None
-        st.session_state.navigation_tab = "DASHBOARD"
-        st.rerun()
+            # Build the complete record before assigning it to the strategies map.
+            saved_config = {
+                "created_date": edit_strat.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+                "status": edit_strat.get("status", "Active"),
+                "type": st_type,
+                "allocated": float(tot_alloc),
+                "realized_pnl": float(edit_strat.get("realized_pnl", 0.0)),
+                "rebalance_freq": rebal_freq,
+                "rebalance_day": int(rebal_day),
+                "groups": selected_groups,
+                "allocation_multiplier": float(alloc_multiplier),
+                "entry_rank": int(entry_rank),
+                "exit_rank": int(exit_rank),
+                "period_days": selected_periods,
+                "period_weights": weights,
+                "pct_from_high": float(pct_high),
+                "pct_from_low": float(pct_low),
+                "moving_average": selected_ma,
+                "use_rs": bool(use_rs),
+                "rs_benchmark": rs_benchmark,
+                "min_price": float(min_price),
+                "use_relative_momentum_filter": bool(use_relative_momentum),
+                "relative_momentum_index": relative_momentum_index,
+                "relative_momentum_ma_type": relative_momentum_ma_type,
+                "relative_momentum_ma_period": int(relative_momentum_ma_period),
+                "use_market_trend_filter": bool(use_market_trend),
+                "market_trend_index": trend_index,
+                "market_trend_indicator": trend_indicator,
+                "market_trend_ma_type": trend_ma_type,
+                "market_trend_ma_period": int(trend_ma_period),
+                "market_trend_vstop_atr_period": int(trend_vstop_atr),
+                "market_trend_vstop_multiplier": float(trend_vstop_multiplier),
+                "market_trend_exit_on_bearish": bool(market_trend_exit_on_bearish),
+                "positions": edit_strat.get("positions", []),
+            }
+            st.session_state.strategies[target_name] = saved_config
+            st.session_state.strategy_save_notice = f"Strategy '{target_name}' saved successfully."
+        except Exception as exc:
+            st.error(
+                f"Strategy was not saved ({type(exc).__name__}): {exc}. "
+                "Your existing strategies have not been intentionally overwritten."
+            )
+        else:
+            st.session_state.editing_strategy_name = None
+            st.session_state.navigation_tab = "DASHBOARD"
+            st.rerun()
 
 # ==========================================
 # PAGE 3: BACKTEST ENGINE SECTION
