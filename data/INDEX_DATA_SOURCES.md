@@ -2,9 +2,9 @@
 
 ## Price history
 
-The app's scanner and backtester use daily price files stamped `FYERS API`. The scheduled workflow uses FYERS API v3 History (`/data/history`, daily resolution) and stores the returned OHLCV values in `data/fyers_history/` for equities/ETFs and `data/index_prices/` for the nine index tickers used by the app. Repeated runs refresh recent dates, deduplicate by date, and backfill older data in 366-calendar-day chunks.
+The app's scanner and backtester use daily price files stamped `FYERS API`. After a successful FYERS login, the app securely updates the current `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN` GitHub Actions secrets and dispatches the history updater. The workflow uses FYERS API v3 History (`/data/history`, daily resolution) and stores returned OHLCV in `data/fyers_history/` for equities/ETFs and `data/index_prices/` for the nine index tickers used by the app. Repeated runs refresh recent dates, deduplicate by date, and backfill older data in 366-calendar-day chunks.
 
-See [FYERS history setup, credentials, rate limits and backtest caveats](FYERS_HISTORY_SETUP.md). The history updater requires GitHub Actions Secrets to be configured separately from Streamlit Secrets; without credentials it skips rather than using another vendor.
+See [FYERS history setup, credentials, rate limits and backtest caveats](FYERS_HISTORY_SETUP.md). One-time setup requires a repository-restricted GitHub fine-grained token in Streamlit Secrets with `Secrets: read/write` and `Contents: read/write`. The FYERS PIN is not needed for the login-triggered updater. The workflow will stop rather than use another price vendor if the login or token-sync step is not configured.
 
 Official API references:
 - FYERS data/history endpoint and candle format: https://github.com/FyersDev/fyers-skills/blob/master/skills/fyers-trading/references/market-data.md
