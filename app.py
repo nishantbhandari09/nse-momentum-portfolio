@@ -354,7 +354,11 @@ def render_fyers_connection_panel():
             st.error(f"FYERS connection failed: {e}")
             st.query_params.clear()
 
-    with st.expander("🔌 FYERS Connection", expanded="fyers_access_token" not in st.session_state):
+    history_setup_pending = not st.session_state.get("_fyers_history_update_status", {}).get("ok", False)
+    with st.expander(
+        "🔌 FYERS Connection",
+        expanded=("fyers_access_token" not in st.session_state) or history_setup_pending,
+    ):
         if "fyers_access_token" in st.session_state:
             st.success("Connected to FYERS for this session. Live quotes are fetched from this session when you scan or value holdings.")
             update_status = st.session_state.get("_fyers_history_update_status")
