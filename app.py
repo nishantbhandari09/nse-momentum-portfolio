@@ -188,7 +188,7 @@ def get_fyers_client():
     return get_authenticated_fyers(st.session_state["fyers_client_id"], st.session_state["fyers_access_token"])
 
 
-def trigger_fyers_history_update_on_login(access_token: str):
+def trigger_fyers_history_update_on_login(access_token: str, app_id: str):
     """Securely hand the fresh login token to GitHub Actions and start a history refresh.
 
     The token is encrypted with GitHub's repository public key before it is
@@ -223,20 +223,26 @@ def trigger_fyers_history_update_on_login(access_token: str):
         key_response.raise_for_status()
         key_data = key_response.json()
         public_key = PublicKey(base64.b64decode(key_data["key"]))
-        encrypted_value = base64.b64encode(
-            SealedBox(public_key).encrypt(str(access_token).encode("utf-8"))
-        ).decode("ascii")
-
-        secret_response = requests.put(
-            f"{api_root}/actions/secrets/FYERS_ACCESS_TOKEN",
-            headers=headers,
-            json={
-                "encrypted_value": encrypted_value,
-                "key_id": key_data["key_id"],
-            },
-            timeout=20,
-        )
-        secret_response.raise_for_status()
+        sealed_box = SealedBox(public_key)
+        # Store the same App ID used by this completed login and its fresh
+        # session token. GitHub receives encrypted values only.
+        for secret_name, secret_value in (
+            ("FYERS_APP_ID", app_id),
+            ("FYERS_ACCESS_TOKEN", access_token),
+        ):
+            encrypted_value = base64.b64encode(
+                sealed_box.encrypt(str(secret_value).encode("utf-8"))
+            ).decode("ascii")
+            secret_response = requests.put(
+                f"{api_root}/actions/secrets/{secret_name}",
+                headers=headers,
+                json={
+                    "encrypted_value": encrypted_value,
+                    "key_id": key_data["key_id"],
+                },
+                timeout=20,
+            )
+            secret_response.raise_for_status()
 
         dispatch_response = requests.post(
             f"{api_root}/dispatches",
@@ -299,7 +305,7 @@ def render_fyers_connection_panel():
             st.session_state["fyers_client_id"] = app_id
             st.session_state["fyers_connected_at"] = datetime.now().isoformat(timespec="seconds")
             update_ok, update_message = trigger_fyers_history_update_on_login(
-                token_bundle["access_token"]
+                token_bundle["access_token"], app_id
             )
             st.session_state["_fyers_history_update_status"] = {
                 "ok": update_ok,
