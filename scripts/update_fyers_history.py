@@ -119,8 +119,14 @@ def get_access_token(app_id: str) -> str:
     )
     pin = os.getenv("FYERS_PIN", "").strip()
 
-    # Prefer a refresh token when the full set is configured so a scheduled run
-    # is not tied to yesterday's short-lived access token.
+    # The Streamlit app writes the fresh access token into the GitHub Actions
+    # secret immediately after OAuth login and dispatches this workflow. Prefer
+    # that token so historical downloads need no separately stored FYERS PIN.
+    if direct_token:
+        print("Using the current FYERS access token supplied by the latest app login.")
+        return direct_token
+
+    # Legacy fallback remains available for a manually configured refresh-token flow.
     if refresh_token and secret_id and pin:
         app_hash = hashlib.sha256(f"{app_id}:{secret_id}".encode("utf-8")).hexdigest()
         try:
