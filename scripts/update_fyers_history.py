@@ -462,6 +462,22 @@ def build_universe(master: pd.DataFrame):
             ticker = normalize_app_ticker(symbol)
             if ticker:
                 etfs.add(ticker)
+
+    # Include every ETF/BEES entry present in FYERS' current symbol master, not
+    # only the user's curated ETF groups. The public master is refreshed daily.
+    if not master.empty and {"Name", "FYERS Symbol"}.issubset(master.columns):
+        for _name, raw_symbol in zip(master["Name"], master["FYERS Symbol"]):
+            name = str(_name or "").strip()
+            fyers_symbol = str(raw_symbol or "").strip().upper()
+            if not fyers_symbol.startswith("NSE:"):
+                continue
+            name_match = bool(re.search(r"\\bETF\\b|BEES|EXCHANGE[\\s-]*TRADED[\\s-]*FUND", name, re.I))
+            symbol_match = bool(re.search(r"ETF|BEES|LIQUIDCASE", fyers_symbol, re.I))
+            if name_match or symbol_match:
+                ticker = normalize_app_ticker(fyers_symbol)
+                if ticker:
+                    etfs.add(ticker)
+
     # Include any ticker represented in previous manifest, even if it has since
     # been delisted from the current symbol master.
     if MANIFEST_PATH.exists():
@@ -600,6 +616,23 @@ def main():
         old = get_frame(ticker)
         previous = run_manifest.get(ticker, {})
         complete = str(previous.get("Backfill Complete", "")).lower() in {"true", "1", "yes"}
+        previous_cursor = str(previous.get("Next Backfill End", "") or "").strip()
+        previous_status = str(previous.get("Status", "") or "").strip().lower()
+
+        # A search cursor means this ticker has already proved it has no candles
+        # in more recent windows. Keep searching backward instead of resetting the
+        # cursor to the most recent year each time the daily workflow runs.
+        if old.empty and previous_cursor:
+            run_manifest[ticker] = manifest_row(
+                ticker, fyers_symbol, asset_type_for(ticker), old, False,
+                "search older history",
+                str(previous.get("Message", "") or "Continue searching older FYERS history."),
+                next_backfill_end=previous_cursor,
+            )
+            continue
+        if old.empty and complete and previous_status == "no history":
+            continue
+
         if old.empty:
             recent_start = max(start_date, today - timedelta(days=365))
         else:
