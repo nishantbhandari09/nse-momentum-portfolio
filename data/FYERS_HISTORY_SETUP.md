@@ -41,7 +41,7 @@ The default workflow is conservative for the Standard plan: `FYERS_MAX_REQUESTS_
 
 - `FYERS_MAX_REQUESTS_PER_RUN=20000`
 - `FYERS_REQUEST_DELAY_SECONDS=0.15`
-- `FYERS_HISTORY_START_DATE=1990-01-01` (the default floor)
+- `FYERS_HISTORY_START_DATE=1990-01-01` (optional Prime-plan history floor; without this variable the script defaults to a rolling five years)
 
 Do not raise the request budget or speed unless your account's actual API rate limits allow it. The updater records pending/error/no-history statuses in the manifest; it does not claim an instrument has history when FYERS returns no usable candles.
 
