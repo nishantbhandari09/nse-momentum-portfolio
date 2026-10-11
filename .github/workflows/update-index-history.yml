@@ -46,7 +46,7 @@ jobs:
           FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
           FYERS_REFRESH_TOKEN: ${{ secrets.FYERS_REFRESH_TOKEN }}
           FYERS_PIN: ${{ secrets.FYERS_PIN }}
-          FYERS_HISTORY_START_DATE: ${{ vars.FYERS_HISTORY_START_DATE || '1990-01-01' }}
+          FYERS_HISTORY_START_DATE: ${{ vars.FYERS_HISTORY_START_DATE || '' }}
           FYERS_MAX_REQUESTS_PER_RUN: ${{ vars.FYERS_MAX_REQUESTS_PER_RUN || '4500' }}
           FYERS_REQUEST_DELAY_SECONDS: ${{ vars.FYERS_REQUEST_DELAY_SECONDS || '1.25' }}
         run: |
