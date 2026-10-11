@@ -28,3 +28,4 @@ jobs:
         run: |
           python -m py_compile app.py fyers_auth.py fyers_history_data.py momentum_data.py index_history_data.py index_constituents.py etf_index_universe.py etf_group_universe.py
           python -m py_compile scripts/update_fyers_history.py scripts/update_index_history.py
+          python -c "import fyers_history_data, index_history_data; import scripts.update_fyers_history as updater; assert len(updater.INDEX_FILE_BY_TICKER) == 9; print('FYERS history reader and index mappings imported successfully')"
