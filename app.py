@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import yfinance as yf
 import requests
 import json
 from io import StringIO
@@ -9,7 +8,7 @@ from datetime import datetime, timedelta
 
 from fyers_auth import (
     get_login_url,
-    exchange_code_for_token,
+    exchange_code_for_tokens,
     get_authenticated_fyers,
     create_signed_state,
     validate_signed_state,
@@ -17,6 +16,7 @@ from fyers_auth import (
 )
 import momentum_data
 import index_history_data
+import fyers_history_data
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
     INDEX_CATEGORIES,
@@ -157,56 +157,24 @@ def get_selected_etf_tickers(groups):
 
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers, period="5y", full_history=False):
-    # Load durable index history first. When a stored series exists, do not
-    # repeatedly download that same index from Yahoo on every scanner/backtest run.
-    try:
-        stored_index_prices = index_history_data.load_index_close_prices()
-    except Exception:
-        stored_index_prices = pd.DataFrame()
+    """Load price history exclusively from the persisted FYERS OHLCV archive.
 
-    stored_index_tickers = set(stored_index_prices.columns) if not stored_index_prices.empty else set()
-    requested_tickers = [t for t in tickers if t not in stored_index_tickers]
-    defensive_and_regime = list(set(
-        t for t in ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
-        if t not in stored_index_tickers
+    The period arguments remain for compatibility with existing scanner and
+    backtest callers. The archive contains the full history available from FYERS;
+    no Yahoo/NSE price fallback is used, and no future values are backfilled.
+    """
+    requested = list(dict.fromkeys(
+        [str(t).strip() for t in (tickers or []) if str(t).strip()]
+        + ALWAYS_FETCH_OVERLAY_TICKERS
+        + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
     ))
-    archive_based = momentum_data.get_prices_with_live_topup(
-        requested_tickers,
-        extra_tickers=defensive_and_regime,
-        missing_period="max" if full_history else "5y",
-    )
-
-    if not archive_based.empty:
-        prices = archive_based
-    else:
-        all_tickers = list(set(requested_tickers + defensive_and_regime))
-        if all_tickers:
-            data = yf.download(
-                tickers=all_tickers,
-                period="max" if full_history else period,
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-            )
-            if isinstance(data.columns, pd.MultiIndex):
-                prices = data["Close"] if "Close" in data.columns else data["Adj Close"]
-            else:
-                prices = data
-        else:
-            prices = pd.DataFrame()
-
-    # Use the checked-in official Nifty index close series. These CSVs persist
-    # in GitHub and are updated daily by the repository workflow.
-    if not stored_index_prices.empty:
-        if prices is None or prices.empty:
-            prices = stored_index_prices
-        else:
-            prices = prices.combine_first(stored_index_prices)
-            prices.update(stored_index_prices)
-
-    # Keep ETFs with shorter available histories; never backfill future prices.
-    prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index().ffill()
-    return prices
+    prices = fyers_history_data.load_close_prices(requested)
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+    prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index()
+    # Forward-fill only after an instrument has traded. This aligns valuations
+    # across non-trading sessions without inventing any earlier prices.
+    return prices.ffill()
 
 # ==========================================
 # FYERS - LIVE PRICE OVERLAY
@@ -703,7 +671,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         # Keep the historical stock archive for point-in-time membership and
         # add the selected ETF groups so they can be ranked in the same strategy.
         tickers = list(dict.fromkeys(
-            momentum_data.load_all_archive_symbols()
+            fyers_history_data.load_all_symbols()
             + get_trusted_tickers_by_group(selected_groups)
         ))
         # Prefer the committed reconstructed Nifty 500 membership intervals. The
@@ -889,6 +857,30 @@ st.markdown("---")
 
 render_fyers_connection_panel()
 
+with st.expander("📚 FYERS Historical Data Status", expanded=False):
+    history_summary = fyers_history_data.get_data_summary()
+    if history_summary["symbols"]:
+        hist_cols = st.columns(4)
+        hist_cols[0].metric("Symbols with History", f'{history_summary["symbols"]:,}')
+        hist_cols[1].metric("Daily Candles Stored", f'{history_summary["rows"]:,}')
+        hist_cols[2].metric("Oldest Stored Date", history_summary["oldest_date"] or "—")
+        hist_cols[3].metric("Backfills Pending", f'{history_summary["backfill_pending"]:,}')
+        st.caption(
+            f'FYERS source coverage through {history_summary["latest_date"] or "—"}. '
+            "Backtests now read this stored dataset only; the updater resumes old-history downloads "
+            "in later runs until the oldest available FYERS data is reached."
+        )
+    else:
+        st.warning(
+            "No FYERS history files are available in this deployment yet. The repository workflow must "
+            "download and commit the files before historical scans/backtests can run."
+        )
+    st.link_button(
+        "Open FYERS Historical Data Workflow",
+        "https://github.com/nishantbhandari09/nse-momentum-portfolio/actions/workflows/update-index-history.yml",
+        use_container_width=True,
+    )
+
 with st.expander("💾 Backups & Downloads"):
     bkp_col1, bkp_col2 = st.columns(2)
     with bkp_col1:
@@ -904,13 +896,28 @@ with st.expander("💾 Backups & Downloads"):
             except Exception as e:
                 st.error(f"Couldn't read that file: {e}")
     with bkp_col2:
-        if momentum_data.PARQUET_PATH.exists():
-            prices_for_download = momentum_data.load_archive_prices("Close")
-            st.download_button("📥 Download cached price history (CSV)",
-                                prices_for_download.to_csv().encode("utf-8"),
-                                "nifty500_price_archive.csv", "text/csv")
+        history_summary = fyers_history_data.get_data_summary()
+        if history_summary["symbols"]:
+            st.markdown("**FYERS historical price database**")
+            st.caption(
+                f'{history_summary["symbols"]:,} symbols with data; '
+                f'{history_summary["rows"]:,} daily candles; '
+                f'coverage {history_summary["oldest_date"] or "—"} to '
+                f'{history_summary["latest_date"] or "—"}.'
+            )
+            if fyers_history_data.MANIFEST_PATH.exists():
+                st.download_button(
+                    "📥 Download FYERS history coverage manifest",
+                    fyers_history_data.MANIFEST_PATH.read_bytes(),
+                    "fyers_history_manifest.csv",
+                    "text/csv",
+                )
         else:
-            st.caption("Price archive not loaded yet — run a scan or backtest first.")
+            st.warning(
+                "The FYERS historical OHLCV archive has not been downloaded to this deployment yet. "
+                "The scanner and backtester will not substitute Yahoo Finance prices. Configure the "
+                "GitHub Actions FYERS secrets and run the history updater workflow."
+            )
 
 # ==========================================
 # PAGE 1: PORTFOLIO DASHBOARD & DRILL-DOWN
