@@ -136,9 +136,13 @@ def get_data_summary() -> dict:
         manifest["Backfill Complete"].astype(str).str.lower().isin(["true", "1", "yes"])
         if "Backfill Complete" in manifest.columns else pd.Series(False, index=manifest.index)
     )
+    row_counts = pd.to_numeric(
+        manifest.get("Rows", pd.Series(0, index=manifest.index)),
+        errors="coerce",
+    ).fillna(0)
     return {
-        "symbols": int(manifest.get("Rows", pd.Series(dtype=float)).gt(0).sum()) if "Rows" in manifest else 0,
-        "rows": int(pd.to_numeric(manifest.get("Rows", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()),
+        "symbols": int(row_counts.gt(0).sum()),
+        "rows": int(row_counts.sum()),
         "oldest_date": manifest["First Date"].min().date().isoformat() if "First Date" in manifest and manifest["First Date"].notna().any() else None,
         "latest_date": manifest["Last Date"].max().date().isoformat() if "Last Date" in manifest and manifest["Last Date"].notna().any() else None,
         "backfill_complete": int(complete.sum()),
