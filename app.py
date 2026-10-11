@@ -163,8 +163,9 @@ def fetch_market_data(tickers, period="5y", full_history=False):
     backtest callers. The archive contains the full history available from FYERS;
     no Yahoo/NSE price fallback is used, and no future values are backfilled.
     """
+    ticker_values = list(tickers) if tickers is not None else []
     requested = list(dict.fromkeys(
-        [str(t).strip() for t in (tickers or []) if str(t).strip()]
+        [str(t).strip() for t in ticker_values if str(t).strip()]
         + ALWAYS_FETCH_OVERLAY_TICKERS
         + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
     ))
@@ -213,8 +214,10 @@ def render_fyers_connection_panel():
                     "Click Connect FYERS and complete a fresh login."
                 )
             with st.spinner("Finishing FYERS connection..."):
-                token = exchange_code_for_token(app_id, secret_key, redirect_uri, callback_code)
-            st.session_state["fyers_access_token"] = token
+                token_bundle = exchange_code_for_tokens(app_id, secret_key, redirect_uri, callback_code)
+            st.session_state["fyers_access_token"] = token_bundle["access_token"]
+            if token_bundle.get("refresh_token"):
+                st.session_state["fyers_refresh_token"] = token_bundle["refresh_token"]
             st.session_state["fyers_client_id"] = app_id
             st.session_state["fyers_connected_at"] = datetime.now().isoformat(timespec="seconds")
             st.query_params.clear()
@@ -232,8 +235,27 @@ def render_fyers_connection_panel():
             connected_at = st.session_state.get("fyers_connected_at")
             if connected_at:
                 st.caption(f"Connected at {connected_at}")
+            refresh_token = str(st.session_state.get("fyers_refresh_token", "") or "")
+            if refresh_token:
+                with st.expander("Set up scheduled FYERS history updates"):
+                    st.caption(
+                        "Add the refresh token below to GitHub → repository Settings → Secrets and variables → "
+                        "Actions as FYERS_REFRESH_TOKEN. Treat it and your FYERS PIN as passwords. Do not paste "
+                        "either into code, issues, or chat."
+                    )
+                    if st.checkbox(
+                        "Reveal refresh token for copying to GitHub Actions Secrets",
+                        value=False,
+                        key="reveal_fyers_refresh_for_github",
+                    ):
+                        st.code(refresh_token, language="text")
+                    st.caption(
+                        "Also create Actions secrets FYERS_APP_ID, FYERS_SECRET_ID and FYERS_PIN. "
+                        "The refresh token is time-limited and may need replacement after it expires."
+                    )
             if st.button("Disconnect FYERS"):
                 st.session_state.pop("fyers_access_token", None)
+                st.session_state.pop("fyers_refresh_token", None)
                 st.session_state.pop("fyers_client_id", None)
                 st.session_state.pop("fyers_connected_at", None)
                 st.rerun()
