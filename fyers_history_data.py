@@ -67,22 +67,30 @@ def load_ohlcv(ticker: str) -> pd.DataFrame:
     return _read_fyers_csv(price_file_for_ticker(value))
 
 
-def load_close_prices(tickers=None) -> pd.DataFrame:
-    """Return a date x app-ticker matrix of stored FYERS closes; never fetches Yahoo data."""
+def load_price_field(tickers=None, field: str = "Close") -> pd.DataFrame:
+    """Return a date x ticker matrix for one FYERS OHLCV field, with no vendor fallback."""
+    field = str(field).strip().title()
+    if field not in {"Open", "High", "Low", "Close", "Volume"}:
+        raise ValueError("field must be one of Open, High, Low, Close or Volume")
     if tickers is None:
         tickers = load_all_symbols()
     unique = list(dict.fromkeys(str(t).strip() for t in tickers if str(t).strip()))
     columns = {}
     for ticker in unique:
         data = load_ohlcv(ticker)
-        if data.empty:
+        if data.empty or field not in data:
             continue
-        series = data.set_index("Date")["Close"].dropna()
+        series = data.set_index("Date")[field].dropna()
         if not series.empty:
             columns[ticker] = series
     if not columns:
         return pd.DataFrame()
     return pd.DataFrame(columns).sort_index()
+
+
+def load_close_prices(tickers=None) -> pd.DataFrame:
+    """Return a date x ticker matrix of stored FYERS closes; never fetches Yahoo data."""
+    return load_price_field(tickers, field="Close")
 
 
 def load_all_symbols() -> list[str]:
