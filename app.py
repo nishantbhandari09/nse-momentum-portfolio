@@ -1598,19 +1598,45 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
                 final_val = float(bt_results["Portfolio Value"].iloc[-1])
                 total_return_pct = ((final_val - initial_cap) / initial_cap) * 100
+                daily_returns = bt_results["Portfolio Value"].pct_change().dropna()
                 peak = bt_results["Portfolio Value"].cummax()
-                drawdown = (bt_results["Portfolio Value"] - peak) / peak
-                max_drawdown_pct = drawdown.min() * 100
+                drawdown = bt_results["Portfolio Value"] / peak - 1.0
+                max_drawdown_pct = float(drawdown.min() * 100)
+                elapsed_days = max(
+                    1,
+                    (pd.Timestamp(bt_results.index[-1]) - pd.Timestamp(bt_results.index[0])).days,
+                )
+                elapsed_years = elapsed_days / 365.25
+                cagr_pct = (
+                    ((final_val / float(initial_cap)) ** (1.0 / elapsed_years) - 1.0) * 100
+                    if initial_cap > 0 and final_val > 0 else float("nan")
+                )
+                daily_vol = float(daily_returns.std(ddof=1)) if len(daily_returns) > 1 else 0.0
+                annual_vol_pct = daily_vol * np.sqrt(252) * 100
+                sharpe_daily = (
+                    float(daily_returns.mean() / daily_vol * np.sqrt(252))
+                    if daily_vol > 0 else 0.0
+                )
 
                 res_m1, res_m2, res_m3 = st.columns(3)
                 res_m1.metric("Final Portfolio Value", f"₹{final_val:,.2f}")
                 res_m2.metric("Total Backtest Return", f"{total_return_pct:.2f}%")
-                res_m3.metric("Max Drawdown", f"{max_drawdown_pct:.2f}%")
+                res_m3.metric("CAGR", f"{cagr_pct:.2f}%")
 
-                st.markdown("#### Portfolio Value Equity Curve")
+                res_m4, res_m5, res_m6 = st.columns(3)
+                res_m4.metric("Maximum Drawdown (Daily)", f"{max_drawdown_pct:.2f}%")
+                res_m5.metric("Annualized Volatility", f"{annual_vol_pct:.2f}%")
+                res_m6.metric("Daily Sharpe Ratio (RF = 0)", f"{sharpe_daily:.2f}")
+
+                st.caption(
+                    "Equity is marked to market every trading day. Signals use data through the previous "
+                    "session and are applied at the next session's close. Sharpe assumes a zero risk-free "
+                    "rate; trading costs, taxes, slippage and dividend cash flows are not included."
+                )
+                st.markdown("#### Daily Portfolio Value Equity Curve")
                 st.line_chart(bt_results["Portfolio Value"])
 
-                st.markdown("#### Historical Monthly Portfolio Curve Data")
+                st.markdown("#### Daily Backtest Data")
                 st.dataframe(bt_results, use_container_width=True)
             else:
                 st.error("Insufficient market data for the selected timeframe. Try selecting a broader timeframe.")
