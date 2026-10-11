@@ -1,17 +1,11 @@
 name: Update FYERS Historical Price Database
 
 on:
+  # A connected FYERS login updates the fresh token secret and triggers this event.
+  repository_dispatch:
+    types: [fyers-login]
+  # Manual retries are available after logging into FYERS from the app.
   workflow_dispatch:
-  schedule:
-    # Run after NSE's cash-market close on weekdays (16:45 IST).
-    - cron: "15 11 * * 1-5"
-  push:
-    paths:
-      - ".github/workflows/update-index-history.yml"
-      - "scripts/update_fyers_history.py"
-      - "fyers_history_data.py"
-      - "index_history_data.py"
-      - "etf_group_universe.py"
 
 permissions:
   contents: write
@@ -42,20 +36,17 @@ jobs:
       - name: Download or incrementally update FYERS historical OHLCV
         env:
           FYERS_APP_ID: ${{ secrets.FYERS_APP_ID }}
-          FYERS_SECRET_ID: ${{ secrets.FYERS_SECRET_ID }}
           FYERS_ACCESS_TOKEN: ${{ secrets.FYERS_ACCESS_TOKEN }}
-          FYERS_REFRESH_TOKEN: ${{ secrets.FYERS_REFRESH_TOKEN }}
-          FYERS_PIN: ${{ secrets.FYERS_PIN }}
           FYERS_HISTORY_START_DATE: ${{ vars.FYERS_HISTORY_START_DATE || '' }}
           FYERS_MAX_REQUESTS_PER_RUN: ${{ vars.FYERS_MAX_REQUESTS_PER_RUN || '4500' }}
           FYERS_REQUEST_DELAY_SECONDS: ${{ vars.FYERS_REQUEST_DELAY_SECONDS || '1.25' }}
         run: |
           if [ -z "$FYERS_APP_ID" ]; then
-            echo "::error::FYERS history was NOT downloaded. Add FYERS_APP_ID and the required FYERS credentials under Settings > Secrets and variables > Actions."
+            echo "::error::FYERS history was NOT downloaded. Complete a fresh FYERS login from the app so it can safely sync FYERS_APP_ID."
             exit 1
           fi
-          if [ -z "$FYERS_ACCESS_TOKEN" ] && { [ -z "$FYERS_REFRESH_TOKEN" ] || [ -z "$FYERS_SECRET_ID" ] || [ -z "$FYERS_PIN" ]; }; then
-            echo "::error::FYERS history was NOT downloaded. Configure either FYERS_ACCESS_TOKEN, or FYERS_SECRET_ID + FYERS_REFRESH_TOKEN + FYERS_PIN."
+          if [ -z "$FYERS_ACCESS_TOKEN" ]; then
+            echo "::error::FYERS history was NOT downloaded. Complete a fresh FYERS login from the app to refresh the access-token secret."
             exit 1
           fi
           python scripts/update_fyers_history.py
