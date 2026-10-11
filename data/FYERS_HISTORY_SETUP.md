@@ -11,33 +11,34 @@ This app's scanner and backtester read persisted daily OHLCV files stamped `FYER
 
 Each symbol file is merged by trading date. Recent candles are refreshed with an overlap; older history is downloaded in chunks no larger than 366 calendar days. Re-running the workflow resumes the backfill and eventually reaches the earliest candle returned by FYERS, or the configured floor `FYERS_HISTORY_START_DATE`.
 
-## Configure GitHub Actions credentials
+## Configure automatic updates when you log in
 
-The FYERS login in Streamlit and GitHub Actions are separate. A token in Streamlit Secrets is NOT automatically available to the GitHub workflow.
+The Streamlit app and GitHub Actions are separate runtimes. To make the historical database update whenever you connect to FYERS, the app securely copies the current login token into a GitHub Actions secret and triggers the updater. The token is encrypted with GitHub's repository public key before upload; it is not put in a workflow input, repository file or log.
 
-1. Open the Streamlit app and complete a fresh login through **FYERS Connection**.
-2. Expand **Set up scheduled FYERS history updates** and tick the checkbox to reveal the refresh token. Copy it privately.
-3. On GitHub, open this repository → **Settings → Secrets and variables → Actions → New repository secret**.
-4. Before running, open your FYERS API app settings and ensure **Market Data → Historical** permission is enabled. Then add these Actions secrets:
+### One-time setup
 
-| Secret | Value |
-|---|---|
-| `FYERS_APP_ID` | Activated FYERS App ID |
-| `FYERS_SECRET_ID` | Secret belonging to that same app |
-| `FYERS_REFRESH_TOKEN` | Refresh token copied from the connected app |
-| `FYERS_PIN` | Your FYERS PIN, requested by the refresh-token endpoint |
+1. Create a **fine-grained personal access token** on GitHub, restricted to this repository: `nishantbhandari09/nse-momentum-portfolio`.
+2. Give it only these repository permissions:
+   - **Secrets: Read and write**
+   - **Contents: Read and write** (to start the repository-dispatch workflow)
+3. In Streamlit Community Cloud, open this app's **Settings → Secrets** and add:
+   ```toml
+   GITHUB_ACTIONS_TOKEN = "paste-your-github-token-here"
+   ```
+   Keep this token private. Never put it in the repository or chat.
+4. Save the Streamlit settings, open the app, and complete a fresh FYERS login.
 
-Never put tokens, the app secret or the PIN in code, commits, issues, or chat. If the refresh-token exchange is not accepted, you can temporarily use `FYERS_ACCESS_TOKEN` as a repository secret, but access tokens expire and are not suitable for indefinite automation.
+After this one-time setup, each successful FYERS login will automatically update the GitHub Actions secrets `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN`, then trigger **Update FYERS Historical Price Database**. No separate FYERS PIN or refresh-token secret is required for this login-triggered flow. The access token is short-lived, so the updater runs using the fresh token sent after each login. Do not manually start a run days later and expect an old token to remain valid; log in again first.
 
-After saving secrets, open **Actions → Update FYERS Historical Price Database → Run workflow**. It also runs on weekdays after market close. If credentials are missing, the workflow deliberately skips downloading instead of fetching prices from another provider.
+If live quotes are available, the connected app fetches them from your current FYERS session while scanning and valuing holdings. The history workflow separately downloads available daily OHLCV candles and commits the progress to `data/fyers_history/`, `data/index_prices/` and the manifest. It may take multiple runs to complete large historical backfills.
 
-FYERS currently documents refresh tokens as valid for 15 days, and its developer reference warns that the refresh-token flow may be discontinued. Scheduled history refresh may therefore require periodically completing a fresh FYERS login and replacing `FYERS_REFRESH_TOKEN` in GitHub Actions Secrets. Treat that as a credential-maintenance requirement, not an automatic guarantee. The updater will stop visibly on an authentication error rather than switch to another price vendor.
+If the app reports that the update could not be triggered, check that the GitHub token is limited to this repository and has the two permissions above. The login and live-quote connection can still work even while historical saving is not configured.
 
 ## FYERS history limits and backfill speed
 
 FYERS' current support page says daily history is limited to the last 5 years on the Standard plan and provides the full available daily history (20+ years) on Prime. The history endpoint allows up to 366 calendar days in one daily-history request. Source: https://support.fyers.in/portal/en/kb/articles/what-are-the-fyers-api-rate-limits-for-standard-and-prime-plans and https://github.com/FyersDev/fyers-skills/blob/master/skills/fyers-trading/references/market-data.md.
 
-The default workflow is conservative for the Standard plan: `FYERS_MAX_REQUESTS_PER_RUN=4500` and `FYERS_REQUEST_DELAY_SECONDS=1.25`. The updater backfills a limited number of chunks per run, so a large universe is filled over multiple workflow runs. After confirming an eligible Prime plan, faster settings can be added as GitHub Actions Variables:
+The updater is conservative for the Standard plan: `FYERS_MAX_REQUESTS_PER_RUN=4500` and `FYERS_REQUEST_DELAY_SECONDS=1.25`. The updater backfills a limited number of chunks per run, so a large universe is filled over multiple workflow runs. After confirming an eligible Prime plan, faster settings can be added as GitHub Actions Variables:
 
 - `FYERS_MAX_REQUESTS_PER_RUN=20000`
 - `FYERS_REQUEST_DELAY_SECONDS=0.15`
