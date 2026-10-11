@@ -26,9 +26,14 @@ The Streamlit app and GitHub Actions are separate runtimes. To make the historic
    GITHUB_ACTIONS_TOKEN = "paste-your-github-token-here"
    ```
    Keep this token private. Never put it in the repository or chat.
-4. Save the Streamlit settings, open the app, and complete a fresh FYERS login.
+4. Save the Streamlit settings and log into FYERS from the app once. As a safety check, the app will display the verified FYERS account ID and will not start a history update until you authorize that account.
+5. Copy the displayed ID into Streamlit Secrets:
+   ```toml
+   FYERS_SYNC_ALLOWED_USER_ID = "your-verified-fyers-account-id"
+   ```
+   Save the setting, disconnect FYERS in the app, and connect again.
 
-After this one-time setup, each successful FYERS login will automatically update the GitHub Actions secrets `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN`, then trigger **Update FYERS Historical Price Database**. No separate FYERS PIN or refresh-token secret is required for this login-triggered flow. The access token is short-lived, so the updater runs using the fresh token sent after each login. Do not manually start a run days later and expect an old token to remain valid; log in again first.
+After this one-time setup, each successful login from the authorized account automatically updates the GitHub Actions secrets `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN`, then triggers **Update FYERS Historical Price Database**. The account check prevents other visitors to the publicly accessible app from overwriting your updater credentials. No separate FYERS PIN or refresh-token secret is required for this login-triggered flow. The access token is short-lived, so the updater runs using the fresh token sent after each login. Do not manually start a run days later and expect an old token to remain valid; log in again first.
 
 If live quotes are available, the connected app fetches them from your current FYERS session while scanning and valuing holdings. The history workflow separately downloads available daily OHLCV candles and commits the progress to `data/fyers_history/`, `data/index_prices/` and the manifest. It may take multiple runs to complete large historical backfills.
 
