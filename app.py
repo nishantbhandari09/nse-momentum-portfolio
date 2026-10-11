@@ -1345,8 +1345,8 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     st.markdown("---")
     save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
     if st.button(save_label, type="primary", use_container_width=True):
-        # Validate first, then update session state in one step. This avoids
-        # leaving a half-written strategy if any input is invalid.
+        # Validate/normalise inputs first, then update session state atomically.
+        # A failed save stays on this page and reports the precise exception.
         target_name = (
             str(st.session_state.editing_strategy_name or "").strip()
             if edit_mode else str(strat_name_input or "").strip()
