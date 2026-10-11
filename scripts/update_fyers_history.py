@@ -561,11 +561,6 @@ def main():
     delay = _env_float("FYERS_REQUEST_DELAY_SECONDS", 1.25)
     today = date.today()
     configured_start = os.getenv("FYERS_HISTORY_START_DATE", "").strip()
-    start_date = (
-        date.fromisoformat(configured_start)
-        if configured_start
-        else (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
-    )
     client = FyersHistoryClient(app_id, token, max_requests=max_requests, delay_seconds=delay)
 
     refresh_membership_ledger()
@@ -573,13 +568,39 @@ def main():
     master = download_symbol_master()
     ticker_map = build_symbol_map(master)
     universe, priority = build_universe(master)
-    print(f"Symbols queued: {len(universe)} (indices, current Nifty 500, ETF groups, historical members).")
+
+    if configured_start:
+        start_date = date.fromisoformat(configured_start)
+        floor_note = "FYERS_HISTORY_START_DATE was explicitly configured."
+    else:
+        # Discover the account's accessible daily-history horizon once using
+        # Nifty 50 data from 2010. Standard accounts should not return it; Prime
+        # accounts with older-history access should. This avoids wasting thousands
+        # of requests walking back through years the account cannot serve.
+        probe_start, probe_end = date(2010, 1, 1), date(2010, 12, 31)
+        try:
+            probe, probe_outcome, probe_message = client.history(
+                ticker_map.get("^NSEI", INDEX_FALLBACK_SYMBOLS["^NSEI"]),
+                probe_start,
+                probe_end,
+            )
+        except FatalAuthError:
+            raise
+        if probe_outcome == "ok" and not probe.empty and probe["Date"].min().date() < (pd.Timestamp(today) - pd.DateOffset(years=5)).date():
+            start_date = date(1990, 1, 1)
+            floor_note = "FYERS returned daily history from 2010; requesting the earliest available series back to 1990."
+        else:
+            start_date = (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
+            floor_note = (
+                "FYERS did not return a 2010 Nifty 50 probe; using the rolling five-year floor. "
+                "Set FYERS_HISTORY_START_DATE to override after confirming the account's history entitlement."
+            )
+            if probe_outcome == "error":
+                print(f"History-window probe response: {probe_message}")
+
+    print(f"Symbols queued: {len(universe)} (indices, current Nifty 500, all current FYERS ETFs, historical members).")
     print(f"Daily history request budget: {max_requests}; request spacing: {delay:.2f}s; earliest requested date: {start_date}.")
-    print(
-        "FYERS history floor was explicitly configured by the repository variable."
-        if configured_start else
-        "No FYERS_HISTORY_START_DATE variable was set; using the rolling five-year floor compatible with Standard daily-history access. Set it to 1990-01-01 only if Prime history is enabled."
-    )
+    print(floor_note)
 
     stored_manifest = read_manifest()
     run_manifest = dict(stored_manifest)
