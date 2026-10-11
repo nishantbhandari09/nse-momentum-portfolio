@@ -200,7 +200,10 @@ def trigger_fyers_history_update_on_login(access_token: str, app_id: str):
     allowed_user_id = str(st.secrets.get("FYERS_SYNC_ALLOWED_USER_ID") or "").strip().upper()
     try:
         profile_response = get_authenticated_fyers(app_id, access_token).get_profile()
-        profile_data = profile_response.get("data", {}) if isinstance(profile_response, dict) else {}
+        if isinstance(profile_response, dict):
+            profile_data = profile_response.get("data") or profile_response
+        else:
+            profile_data = {}
         logged_in_user_id = str(
             profile_data.get("fy_id")
             or profile_data.get("fyId")
@@ -371,13 +374,18 @@ def render_fyers_connection_panel():
                 st.secrets.get("GITHUB_ACTIONS_TOKEN")
                 or st.secrets.get("GITHUB_TOKEN")
             ):
-                st.info(
+                setup_message = (
                     "One-time setup for saved history: add GITHUB_ACTIONS_TOKEN in Streamlit Secrets "
                     "using a fine-grained token limited to this repository (Secrets read/write and Contents "
-                    "read/write). Also set FYERS_SYNC_ALLOWED_USER_ID to the verified FYERS account ID shown "
-                    "after your first login. After setup, each login from that account triggers a history "
+                    "read/write). After setup, each login from your authorized account triggers a history "
                     "refresh; your FYERS PIN is not needed."
                 )
+                if not st.secrets.get("FYERS_SYNC_ALLOWED_USER_ID"):
+                    setup_message += (
+                        " Also set FYERS_SYNC_ALLOWED_USER_ID to the verified FYERS account ID shown "
+                        "after your first login."
+                    )
+                st.info(setup_message)
             connected_at = st.session_state.get("fyers_connected_at")
             if connected_at:
                 st.caption(f"Connected at {connected_at}")
