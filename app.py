@@ -1104,6 +1104,37 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         st.error("Backtest stopped: no trading sessions exist in the selected date range.")
         return None, None, None
 
+    # Large one-session close changes can be genuine crashes/rallies, but in an
+    # unadjusted series they can also signal a split, bonus or other corporate
+    # action. Flag them because an unadjusted price drop can corrupt portfolio
+    # returns and drawdown even if the CSV has a complete date range.
+    potential_corporate_actions = []
+    quality_start = start_ts - pd.Timedelta(days=400)
+    for ticker in tickers:
+        if ticker not in raw_prices.columns or ticker.startswith("^"):
+            continue
+        series = raw_prices[ticker].dropna()
+        series = series.loc[(series.index >= quality_start) & (series.index <= end_ts)]
+        if len(series) < 2:
+            continue
+        jumps = series.pct_change()
+        jumps = jumps[jumps.abs() >= 0.25]
+        for event_date, move in jumps.items():
+            potential_corporate_actions.append(
+                (ticker, event_date.date().isoformat(), float(move) * 100.0)
+            )
+    if potential_corporate_actions:
+        examples = [
+            f"{symbol} on {event_date}: {change:+.1f}%"
+            for symbol, event_date, change in potential_corporate_actions[:12]
+        ]
+        st.warning(
+            f"Data-quality warning: found {len(potential_corporate_actions)} single-session stock price "
+            "moves of 25% or more in the backtest window/warm-up. Some may be real, but others may be "
+            "unadjusted splits/bonuses/corporate actions. Check these dates before trusting total return "
+            "or maximum drawdown. Examples: " + "; ".join(examples)
+        )
+
     # Require enough pre-start rows to calculate momentum, proximity, MA and RS
     # signals without borrowing future values or starting with a warmed-up curve.
     lookback_periods = [int(p) for p in strat_config.get("period_days", [252, 120, 60]) if int(p) > 0]
