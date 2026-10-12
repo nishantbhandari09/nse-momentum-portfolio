@@ -9,6 +9,7 @@ from pathlib import Path
 from io import StringIO
 
 import pandas as pd
+import numpy as np
 import requests
 
 ROOT = Path(__file__).resolve().parent
@@ -147,19 +148,38 @@ def get_index_history_coverage(today=None, max_stale_days=10):
         start_ok = first <= expected + pd.Timedelta(days=7)
         recent_ok = (today - last).days <= max_stale_days
         gaps = int((dates.diff().dropna() > pd.Timedelta(days=7)).sum())
+        ohlc = frame.reindex(columns=["Open", "High", "Low", "Close"])
+        valid_ohlc = (
+            ohlc.notna().all(axis=1)
+            & np.isfinite(ohlc).all(axis=1)
+            & ohlc.gt(0).all(axis=1)
+            & (ohlc["High"] >= ohlc[["Open", "Close"]].max(axis=1))
+            & (ohlc["Low"] <= ohlc[["Open", "Close"]].min(axis=1))
+            & (ohlc["High"] >= ohlc["Low"])
+        )
+        invalid_ohlc_rows = int((~valid_ohlc).sum())
+        large_close_moves = int(
+            (ohlc["Close"].pct_change().abs() > 0.15).fillna(False).sum()
+        )
         if not start_ok:
             status = "INCOMPLETE — starts after target"
         elif not recent_ok:
             status = "INCOMPLETE — latest data is stale"
+        elif invalid_ohlc_rows:
+            status = f"CHECK — {invalid_ohlc_rows} invalid OHLC row(s)"
         elif gaps:
             status = f"CHECK — {gaps} gap(s) over 7 days"
+        elif large_close_moves:
+            status = f"REVIEW — {large_close_moves} close move(s) over 15%"
         else:
-            status = "RANGE COVERED — candle-level validation still required"
+            status = "RANGE COVERED — price values not reference-validated"
         records.append({
             "Index": name, "Target Start": expected.date().isoformat(),
             "First Stored Date": first.date().isoformat(),
             "Last Stored Date": last.date().isoformat(),
             "Candles": int(len(dates)), "Internal Gaps (>7d)": gaps,
+            "Invalid OHLC Rows": invalid_ohlc_rows,
+            "Close Moves >15%": large_close_moves,
             "Start Covered": bool(start_ok), "Recent Data": bool(recent_ok),
             "Coverage Status": status,
         })
