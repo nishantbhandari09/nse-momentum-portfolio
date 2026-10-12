@@ -122,6 +122,50 @@ def load_index_close_prices():
     return pd.DataFrame(series).sort_index()
 
 
+def get_index_history_coverage(today=None, max_stale_days=10):
+    """Audit index date coverage against the configured earliest target date.
+
+    This checks date range and unusually long internal gaps, not price values
+    against an official exchange file.
+    """
+    today = pd.Timestamp(today or pd.Timestamp.now().date()).normalize()
+    records = []
+    for name, spec in INDEX_HISTORY_SPECS.items():
+        frame = load_index_ohlc(spec["ticker"])
+        expected = pd.Timestamp(spec["start_date"]).normalize()
+        if frame.empty:
+            records.append({
+                "Index": name, "Target Start": expected.date().isoformat(),
+                "First Stored Date": None, "Last Stored Date": None,
+                "Candles": 0, "Internal Gaps (>7d)": None,
+                "Start Covered": False, "Recent Data": False,
+                "Coverage Status": "MISSING",
+            })
+            continue
+        dates = pd.to_datetime(frame["Date"], errors="coerce").dropna().sort_values().drop_duplicates()
+        first, last = dates.iloc[0].normalize(), dates.iloc[-1].normalize()
+        start_ok = first <= expected + pd.Timedelta(days=7)
+        recent_ok = (today - last).days <= max_stale_days
+        gaps = int((dates.diff().dropna() > pd.Timedelta(days=7)).sum())
+        if not start_ok:
+            status = "INCOMPLETE — starts after target"
+        elif not recent_ok:
+            status = "INCOMPLETE — latest data is stale"
+        elif gaps:
+            status = f"CHECK — {gaps} gap(s) over 7 days"
+        else:
+            status = "RANGE COVERED — candle-level validation still required"
+        records.append({
+            "Index": name, "Target Start": expected.date().isoformat(),
+            "First Stored Date": first.date().isoformat(),
+            "Last Stored Date": last.date().isoformat(),
+            "Candles": int(len(dates)), "Internal Gaps (>7d)": gaps,
+            "Start Covered": bool(start_ok), "Recent Data": bool(recent_ok),
+            "Coverage Status": status,
+        })
+    return pd.DataFrame(records)
+
+
 def load_membership_history():
     """Read the checked-in PIT membership table; use its public source as a fallback."""
     frame = None
