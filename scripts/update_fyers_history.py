@@ -645,6 +645,26 @@ def main():
 
     stored_manifest = read_manifest()
     run_manifest = dict(stored_manifest)
+    # A previous run could have marked an index complete only at the Standard
+    # plan's five-year floor. If this account now exposes older history, do not
+    # let that old flag suppress the newly possible inception backfill.
+    for ticker, entry in run_manifest.items():
+        index_name = index_history_data.TICKER_TO_INDEX_NAME.get(ticker)
+        if not index_name:
+            continue
+        expected_start = pd.Timestamp(
+            index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"]
+        )
+        first_text = str(entry.get("First Date", "") or "").strip()
+        try:
+            first_saved = pd.Timestamp(first_text) if first_text else pd.NaT
+        except (TypeError, ValueError):
+            first_saved = pd.NaT
+        covers_inception = pd.notna(first_saved) and (
+            first_saved <= expected_start + pd.Timedelta(days=7)
+        )
+        if not covers_inception:
+            entry["Backfill Complete"] = "False"
     local_frames = {}
     ticker_to_api = {}
     pending_retries = []
