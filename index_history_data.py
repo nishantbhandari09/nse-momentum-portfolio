@@ -142,7 +142,8 @@ def get_index_history_coverage(today=None, max_stale_days=10):
                 "First Stored Date": None, "Last Stored Date": None,
                 "Candles": 0, "Internal Gaps (>7d)": None,
                 "Invalid OHLC Rows": None, "Close Moves >15%": None,
-                "Start Covered": False, "Launch Covered": False,
+                "Start Covered": False,
+                "Launch Covered": False if str(spec.get("launch_date") or "").strip() else None,
                 "Recent Data": False, "Coverage Status": "MISSING",
             })
             continue
