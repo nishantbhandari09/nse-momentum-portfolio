@@ -1063,14 +1063,21 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                         f"{index_name}: first saved candle {audit_row.get('First Stored Date') or 'missing'}; "
                         f"target start {audit_row.get('Target Start')}"
                     )
-                elif int(pd.to_numeric(audit_row.get("Internal Gaps (>7d)", 0), errors="coerce") or 0) > 0:
-                    incomplete_inception.append(
-                        f"{index_name}: has calendar gaps longer than 7 days"
+                else:
+                    gap_count = pd.to_numeric(
+                        audit_row.get("Internal Gaps (>7d)", 0), errors="coerce"
                     )
-                elif int(pd.to_numeric(audit_row.get("Invalid OHLC Rows", 0), errors="coerce") or 0) > 0:
-                    incomplete_inception.append(
-                        f"{index_name}: has invalid OHLC rows"
+                    invalid_ohlc_count = pd.to_numeric(
+                        audit_row.get("Invalid OHLC Rows", 0), errors="coerce"
                     )
+                    if pd.notna(gap_count) and int(gap_count) > 0:
+                        incomplete_inception.append(
+                            f"{index_name}: has calendar gaps longer than 7 days"
+                        )
+                    elif pd.notna(invalid_ohlc_count) and int(invalid_ohlc_count) > 0:
+                        incomplete_inception.append(
+                            f"{index_name}: has invalid OHLC rows"
+                        )
             if incomplete_inception:
                 st.warning(
                     "Index inception/data-quality check: the stored history for this strategy is not "
