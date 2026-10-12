@@ -85,6 +85,7 @@ MANIFEST_COLUMNS = [
     "App Ticker", "FYERS Symbol", "Asset Type", "First Date", "Last Date",
     "Rows", "Backfill Complete", "Next Backfill End", "Last Updated", "Status", "Message",
     "Expected Start", "Covers Expected Start",
+    "Expected Launch", "Covers Launch",
 ]
 
 
@@ -546,10 +547,19 @@ def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.Data
         str(index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"])
         if index_name else ""
     )
+    expected_launch = (
+        str(index_history_data.INDEX_HISTORY_SPECS[index_name].get("launch_date") or "")
+        if index_name else ""
+    )
     covers_expected_start = (
         bool(first)
         and bool(expected_start)
         and pd.Timestamp(first) <= pd.Timestamp(expected_start) + pd.Timedelta(days=7)
+    )
+    covers_launch = (
+        bool(first)
+        and bool(expected_launch)
+        and pd.Timestamp(first) <= pd.Timestamp(expected_launch) + pd.Timedelta(days=7)
     )
     return {
         "App Ticker": ticker,
@@ -566,6 +576,10 @@ def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.Data
         "Expected Start": expected_start,
         "Covers Expected Start": (
             "Yes" if covers_expected_start else ("No" if expected_start else "")
+        ),
+        "Expected Launch": expected_launch,
+        "Covers Launch": (
+            "Yes" if covers_launch else ("No" if expected_launch else "")
         ),
     }
 
