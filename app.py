@@ -175,9 +175,10 @@ def fetch_market_data(tickers, period="5y", full_history=False):
     if prices is None or prices.empty:
         return pd.DataFrame()
     prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index()
-    # Forward-fill only after an instrument has traded. This aligns valuations
-    # across non-trading sessions without inventing any earlier prices.
-    return prices.ffill()
+    # Carry a prior close for at most five union trading rows. Unlimited
+    # forward-fill makes delisted/suspended stocks look flat forever and can
+    # materially understate volatility and max drawdown.
+    return prices.ffill(limit=5)
 
 # ==========================================
 # FYERS - LIVE PRICE OVERLAY
@@ -1180,6 +1181,34 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 
     for dt in simulation_dates:
         close_row = prices_df.loc[dt]
+
+        # Never value an open holding indefinitely at its last known close.
+        # If more than five rows have passed without another candle, there is
+        # no reliable portfolio liquidation / corporate-action price. Stop
+        # instead of emitting misleading final return and max-drawdown metrics.
+        unpriceable_holdings = []
+        for sym in current_holdings:
+            price_now = close_row.get(sym, np.nan)
+            if pd.isna(price_now) or not np.isfinite(float(price_now)) or float(price_now) <= 0:
+                last_real_date = None
+                if sym in raw_prices.columns:
+                    observed = raw_prices[sym].dropna()
+                    observed = observed.loc[observed.index <= dt]
+                    if not observed.empty:
+                        last_real_date = observed.index[-1].date().isoformat()
+                unpriceable_holdings.append(
+                    f"{sym} (last real close: {last_real_date or 'none'})"
+                )
+        if unpriceable_holdings:
+            st.error(
+                "Backtest stopped rather than calculate unreliable returns/drawdown. "
+                "An open holding has no recent FYERS candle: "
+                + ", ".join(unpriceable_holdings[:10])
+                + ". This may indicate delisting, suspension, a missing download, or a corporate action. "
+                "Check the history and delisting/corporate-action outcome before trusting the metrics."
+            )
+            return None, None, None
+
         # Daily valuation before trades: prior positions earn the close-to-close
         # move up to this date. The same close is then used to execute today's
         # target, which was generated from the prior session's data only.
@@ -1209,9 +1238,10 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                     # unpriceable, keep the existing portfolio instead.
                     tradable = [
                         sym for sym in selected_stocks
-                        if sym in prices_df.columns
-                        and pd.notna(close_row.get(sym, np.nan))
-                        and float(close_row.get(sym, 0.0)) > 0
+                        if sym in raw_prices.columns
+                        and pd.notna(raw_prices.at[dt, sym])
+                        and np.isfinite(float(raw_prices.at[dt, sym]))
+                        and float(raw_prices.at[dt, sym]) > 0
                     ]
                     if tradable:
                         current_cash = daily_value
