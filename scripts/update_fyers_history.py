@@ -84,6 +84,7 @@ OHLCV_COLUMNS = ["Date", "Open", "High", "Low", "Close", "Volume", "Source"]
 MANIFEST_COLUMNS = [
     "App Ticker", "FYERS Symbol", "Asset Type", "First Date", "Last Date",
     "Rows", "Backfill Complete", "Next Backfill End", "Last Updated", "Status", "Message",
+    "Expected Start", "Covers Expected Start",
 ]
 
 
@@ -540,6 +541,16 @@ def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.Data
         first = dates.min().date().isoformat() if not dates.empty else ""
         last = dates.max().date().isoformat() if not dates.empty else ""
         rows = len(frame)
+    index_name = index_history_data.TICKER_TO_INDEX_NAME.get(ticker)
+    expected_start = (
+        str(index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"])
+        if index_name else ""
+    )
+    covers_expected_start = (
+        bool(first)
+        and bool(expected_start)
+        and pd.Timestamp(first) <= pd.Timestamp(expected_start) + pd.Timedelta(days=7)
+    )
     return {
         "App Ticker": ticker,
         "FYERS Symbol": fyers_symbol,
@@ -552,6 +563,10 @@ def manifest_row(ticker: str, fyers_symbol: str, asset_type: str, frame: pd.Data
         "Last Updated": datetime.now().isoformat(timespec="seconds"),
         "Status": status,
         "Message": str(message)[:500],
+        "Expected Start": expected_start,
+        "Covers Expected Start": (
+            "Yes" if covers_expected_start else ("No" if expected_start else "")
+        ),
     }
 
 
@@ -614,9 +629,19 @@ def main():
             if probe_outcome == "error":
                 print(f"History-window probe response: {probe_message}")
 
+    def history_floor_for(ticker: str) -> date:
+        """Use each index's earliest target when the account plan permits it."""
+        index_name = index_history_data.TICKER_TO_INDEX_NAME.get(ticker)
+        if not index_name:
+            return start_date
+        target = date.fromisoformat(index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"])
+        # The plan's global history floor can be later than index inception.
+        return max(start_date, target)
+
     print(f"Symbols queued: {len(universe)} (indices, current Nifty 500, all current FYERS ETFs, historical members).")
-    print(f"Daily history request budget: {max_requests}; request spacing: {delay:.2f}s; earliest requested date: {start_date}.")
+    print(f"Daily history request budget: {max_requests}; request spacing: {delay:.2f}s; earliest general history floor: {start_date}.")
     print(floor_note)
+    print("Index backfills target their configured earliest series date when the FYERS plan exposes older history.")
 
     stored_manifest = read_manifest()
     run_manifest = dict(stored_manifest)
@@ -680,18 +705,19 @@ def main():
         if old.empty and complete and previous_status == "no history":
             continue
 
+        symbol_floor = history_floor_for(ticker)
         if old.empty:
-            recent_start = max(start_date, today - timedelta(days=365))
+            recent_start = max(symbol_floor, today - timedelta(days=365))
         else:
             latest = pd.to_datetime(old["Date"], errors="coerce").max().date()
             if (today - latest).days <= 10:
-                recent_start = max(start_date, latest - timedelta(days=7))
+                recent_start = max(symbol_floor, latest - timedelta(days=7))
             elif (today - latest).days <= 365:
-                recent_start = max(start_date, latest - timedelta(days=7))
+                recent_start = max(symbol_floor, latest - timedelta(days=7))
             else:
                 # Bridge long outages forward in <=366-day windows. Repeated runs
                 # continue from the latest stored date until current data is reached.
-                recent_start = max(start_date, latest - timedelta(days=7))
+                recent_start = max(symbol_floor, latest - timedelta(days=7))
         recent_end = min(today, recent_start + timedelta(days=365))
         # If the selected span is older than the most recent data, a future run
         # will continue closing the gap. Do not request over 366 calendar days.
@@ -713,7 +739,7 @@ def main():
             # latest 365-day window can be empty even when older candles exist.
             # Persist a cursor and search older windows before declaring no history.
             if old.empty:
-                if recent_start <= start_date:
+                if recent_start <= symbol_floor:
                     run_manifest[ticker] = manifest_row(
                         ticker, fyers_symbol, asset_type_for(ticker), old, True,
                         "no history", message or "No FYERS daily candles returned at the configured history floor.",
@@ -740,7 +766,7 @@ def main():
             run_manifest[ticker] = manifest_row(ticker, fyers_symbol, asset_type_for(ticker), old, True, "no history", "No usable daily candles.")
         else:
             first_date = pd.to_datetime(old["Date"], errors="coerce").min().date()
-            reached_floor = first_date <= start_date
+            reached_floor = first_date <= symbol_floor
             run_manifest[ticker] = manifest_row(ticker, fyers_symbol, asset_type_for(ticker), old, complete or reached_floor, "ok", "")
         if client.request_count and client.request_count % 100 == 0:
             print(f"Recent refresh progress: {client.request_count}/{max_requests} requests; {ticker} now has {len(old)} candles.")
@@ -765,7 +791,7 @@ def main():
                     candidates.append(ticker)
                 continue
             first_date = pd.to_datetime(frame["Date"], errors="coerce").min().date()
-            if first_date <= start_date:
+            if first_date <= history_floor_for(ticker):
                 run_manifest[ticker] = manifest_row(
                     ticker, ticker_to_api.get(ticker, api_symbol_for(ticker)),
                     asset_type_for(ticker), frame, True, "ok", "Configured earliest date reached.",
@@ -789,7 +815,7 @@ def main():
             else:
                 first_date = pd.to_datetime(frame["Date"], errors="coerce").min().date()
                 to_date = first_date - timedelta(days=1)
-            from_date = max(start_date, to_date - timedelta(days=365))
+            from_date = max(history_floor_for(ticker), to_date - timedelta(days=365))
             try:
                 older, outcome, message = process_request(ticker, from_date, to_date)
             except HistoryRateLimit:
@@ -809,7 +835,7 @@ def main():
                 continue
             if outcome == "empty":
                 if frame.empty:
-                    if from_date <= start_date:
+                    if from_date <= history_floor_for(ticker):
                         run_manifest[ticker] = manifest_row(
                             ticker, ticker_to_api[ticker], asset_type_for(ticker), frame,
                             True, "no history", message or "No older candles available at the configured floor.",
@@ -833,7 +859,7 @@ def main():
             merged = merge_and_write(ticker, frame, older)
             local_frames[ticker] = merged
             first_merged = pd.to_datetime(merged["Date"], errors="coerce").min().date()
-            reached_floor = first_merged <= start_date or from_date <= start_date
+            reached_floor = first_merged <= history_floor_for(ticker) or from_date <= history_floor_for(ticker)
             run_manifest[ticker] = manifest_row(
                 ticker, ticker_to_api[ticker], asset_type_for(ticker), merged,
                 reached_floor, "ok", "Earliest configured date reached." if reached_floor else "",
