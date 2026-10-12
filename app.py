@@ -993,18 +993,114 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         if relative_index_ticker not in tickers:
             tickers.append(relative_index_ticker)
 
-    # Keep pre-start prices for lookback indicators, but stop at the requested end.
-    # fetch_market_data reads only FYERS-stamped local price files.
+    # Explicitly request the series needed by the configured risk/relative-strength
+    # rules. A missing benchmark must never silently disable a strategy filter.
+    required_benchmarks = []
+    if strat_config.get("use_rs", True):
+        if str(strat_config.get("rs_benchmark", "Nifty 500 / G-Sec")) == "Nifty 50 / Liquid ETF":
+            rs_index_ticker, rs_defensive_ticker = "^NSEI", "LIQUIDBEES.NS"
+        else:
+            rs_index_ticker, rs_defensive_ticker = NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER
+        required_benchmarks.extend([rs_index_ticker, rs_defensive_ticker])
+    if strat_config.get("use_relative_momentum_filter", False):
+        required_benchmarks.append(relative_index_ticker)
+    if strat_config.get("use_market_trend_filter", False):
+        trend_ticker = MAJOR_MARKET_INDICES.get(
+            strat_config.get("market_trend_index", "Nifty 50")
+        )
+        if trend_ticker:
+            required_benchmarks.append(trend_ticker)
+    tickers = list(dict.fromkeys(tickers + required_benchmarks))
+
+    start_ts = pd.Timestamp(start_date).normalize()
+    end_ts = pd.Timestamp(end_date).normalize()
+    today = pd.Timestamp.now().normalize()
+    if end_ts < start_ts:
+        st.error("Backtest stopped: the end date is earlier than the start date.")
+        return None, None, None
+    if end_ts > today:
+        st.error("Backtest stopped: the end date is in the future. Select a date up to today.")
+        return None, None, None
+    if float(initial_capital) <= 0:
+        st.error("Backtest stopped: initial capital must be greater than zero.")
+        return None, None, None
+
+    # Audit the raw stored candles before forward-filling for portfolio valuation.
+    # Using ffilled data here would hide stale/missing source dates.
+    audit_tickers = list(dict.fromkeys(
+        tickers + ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER, "^NSEI"]
+    ))
+    raw_prices = fyers_history_data.load_close_prices(audit_tickers)
+    if raw_prices is None or raw_prices.empty:
+        st.error("Backtest stopped: the stored FYERS history database is empty. Log into FYERS and confirm the historical update completed.")
+        return None, None, None
+    raw_prices.index = pd.to_datetime(raw_prices.index, errors="coerce").tz_localize(None).normalize()
+    raw_prices = raw_prices.loc[~raw_prices.index.isna()].sort_index()
+    raw_prices = raw_prices.loc[:, ~raw_prices.isna().all(axis=0)]
+    in_range = raw_prices.loc[(raw_prices.index >= start_ts) & (raw_prices.index <= end_ts)]
+    in_range_dates = in_range.index[in_range.notna().any(axis=1)] if not in_range.empty else pd.DatetimeIndex([])
+    if in_range_dates.empty:
+        st.error(
+            f"Backtest stopped: no saved FYERS candles exist between {start_ts.date()} and {end_ts.date()}. "
+            "The app will not shift your requested backtest dates silently."
+        )
+        return None, None, None
+    if (in_range_dates[0] - start_ts).days > 10:
+        st.error(
+            f"Backtest stopped: you requested {start_ts.date()}, but the first saved candle in that period is "
+            f"{in_range_dates[0].date()}. Historical data before that date is missing."
+        )
+        return None, None, None
+    if (end_ts - in_range_dates[-1]).days > 10:
+        st.error(
+            f"Backtest stopped: you requested data through {end_ts.date()}, but the latest stored candle in that "
+            f"period is {in_range_dates[-1].date()}. Update the FYERS history before trusting the results."
+        )
+        return None, None, None
+
+    coverage_errors = []
+    for ticker in dict.fromkeys(required_benchmarks):
+        if ticker not in raw_prices.columns:
+            coverage_errors.append(f"{ticker}: no saved history file")
+            continue
+        series = raw_prices[ticker].dropna()
+        if series.empty:
+            coverage_errors.append(f"{ticker}: no valid candles")
+            continue
+        if series.index.min() > start_ts + pd.Timedelta(days=7):
+            coverage_errors.append(
+                f"{ticker}: saved history starts {series.index.min().date()}, after requested start {start_ts.date()}"
+            )
+        to_end = series.loc[:end_ts]
+        if to_end.empty or (end_ts - to_end.index.max()).days > 10:
+            coverage_errors.append(
+                f"{ticker}: no recent candle within 10 days of requested end {end_ts.date()}"
+            )
+        # Index benchmark candles should be continuous across normal market weeks.
+        selected_period = series.loc[(series.index >= start_ts) & (series.index <= end_ts)]
+        if len(selected_period) > 1:
+            long_gaps = selected_period.index.to_series().diff().dropna()
+            if (long_gaps > pd.Timedelta(days=7)).any():
+                coverage_errors.append(f"{ticker}: one or more gaps longer than 7 calendar days in the requested range")
+    if coverage_errors:
+        st.error(
+            "Backtest stopped because a required benchmark failed the history-coverage check:\n\n"
+            + "\n".join(f"• {error}" for error in coverage_errors)
+        )
+        return None, None, None
+
+    # This call reads the same stored FYERS candles but forward-fills after each
+    # symbol's first real candle so daily holdings can be marked between sessions.
     prices_df = fetch_market_data(tickers, period="5y", full_history=True)
     if prices_df is None or prices_df.empty:
+        st.error("Backtest stopped: no usable FYERS prices were loaded for the selected universe.")
         return None, None, None
     prices_df.index = pd.to_datetime(prices_df.index, errors="coerce").tz_localize(None).normalize()
     prices_df = prices_df.loc[~prices_df.index.isna()].sort_index()
-    start_ts = pd.Timestamp(start_date).normalize()
-    end_ts = pd.Timestamp(end_date).normalize()
     prices_df = prices_df.loc[:end_ts]
     simulation_dates = prices_df.index[(prices_df.index >= start_ts) & (prices_df.index <= end_ts)]
     if simulation_dates.empty:
+        st.error("Backtest stopped: no trading sessions exist in the selected date range.")
         return None, None, None
 
     # Require enough pre-start rows to calculate momentum, proximity, MA and RS
