@@ -25,39 +25,39 @@ MEMBERSHIP_URL = (
 INDEX_HISTORY_SPECS = {
     "Nifty 50": {
         "official_name": "NIFTY 50", "ticker": "^NSEI",
-        "start_date": "1996-04-22", "filename": "nifty_50.csv",
+        "launch_date": "1996-04-22", "start_date": "1996-04-22", "filename": "nifty_50.csv",
     },
     "Nifty Bank": {
         "official_name": "NIFTY BANK", "ticker": "^NSEBANK",
-        "start_date": "2000-01-01", "filename": "nifty_bank.csv",
+        "launch_date": "2003-09-15", "start_date": "2000-01-01", "filename": "nifty_bank.csv",
     },
     "Nifty 500": {
         "official_name": "NIFTY 500", "ticker": "^CRSLDX",
-        "start_date": "1995-01-01", "filename": "nifty_500.csv",
+        "launch_date": "", "start_date": "1995-01-01", "filename": "nifty_500.csv",
     },
     "Nifty 200": {
         "official_name": "NIFTY 200", "ticker": "^CNX200",
-        "start_date": "2004-01-01", "filename": "nifty_200.csv",
+        "launch_date": "2011-07-19", "start_date": "2004-01-01", "filename": "nifty_200.csv",
     },
     "Nifty IT": {
         "official_name": "NIFTY IT", "ticker": "^CNXIT",
-        "start_date": "1996-01-01", "filename": "nifty_it.csv",
+        "launch_date": "", "start_date": "1996-01-01", "filename": "nifty_it.csv",
     },
     "Nifty Pharma": {
         "official_name": "NIFTY PHARMA", "ticker": "^CNXPHARMA",
-        "start_date": "2001-01-01", "filename": "nifty_pharma.csv",
+        "launch_date": "2005-07-01", "start_date": "2001-01-01", "filename": "nifty_pharma.csv",
     },
     "Nifty Auto": {
         "official_name": "NIFTY AUTO", "ticker": "^CNXAUTO",
-        "start_date": "2004-01-01", "filename": "nifty_auto.csv",
+        "launch_date": "2011-07-12", "start_date": "2004-01-01", "filename": "nifty_auto.csv",
     },
     "Nifty FMCG": {
         "official_name": "NIFTY FMCG", "ticker": "^CNXFMCG",
-        "start_date": "1996-01-01", "filename": "nifty_fmcg.csv",
+        "launch_date": "1999-09-22", "start_date": "1996-01-01", "filename": "nifty_fmcg.csv",
     },
     "Nifty Metal": {
         "official_name": "NIFTY METAL", "ticker": "^CNXMETAL",
-        "start_date": "2004-01-01", "filename": "nifty_metal.csv",
+        "launch_date": "2011-07-12", "start_date": "2004-01-01", "filename": "nifty_metal.csv",
     },
 }
 
@@ -136,17 +136,25 @@ def get_index_history_coverage(today=None, max_stale_days=10):
         expected = pd.Timestamp(spec["start_date"]).normalize()
         if frame.empty:
             records.append({
-                "Index": name, "Target Start": expected.date().isoformat(),
+                "Index": name,
+                "Launch Date": spec.get("launch_date") or "Not published",
+                "Target Start": expected.date().isoformat(),
                 "First Stored Date": None, "Last Stored Date": None,
                 "Candles": 0, "Internal Gaps (>7d)": None,
                 "Invalid OHLC Rows": None, "Close Moves >15%": None,
-                "Start Covered": False, "Recent Data": False,
-                "Coverage Status": "MISSING",
+                "Start Covered": False, "Launch Covered": False,
+                "Recent Data": False, "Coverage Status": "MISSING",
             })
             continue
         dates = pd.to_datetime(frame["Date"], errors="coerce").dropna().sort_values().drop_duplicates()
         first, last = dates.iloc[0].normalize(), dates.iloc[-1].normalize()
         start_ok = first <= expected + pd.Timedelta(days=7)
+        launch_text = str(spec.get("launch_date") or "").strip()
+        if launch_text:
+            launch_ts = pd.Timestamp(launch_text).normalize()
+            launch_ok = first <= launch_ts + pd.Timedelta(days=7)
+        else:
+            launch_ok = None
         recent_ok = (today - last).days <= max_stale_days
         gaps = int((dates.diff().dropna() > pd.Timedelta(days=7)).sum())
         ohlc = frame.reindex(columns=["Open", "High", "Low", "Close"])
@@ -175,14 +183,16 @@ def get_index_history_coverage(today=None, max_stale_days=10):
         else:
             status = "RANGE COVERED — price values not reference-validated"
         records.append({
-            "Index": name, "Target Start": expected.date().isoformat(),
+            "Index": name,
+            "Launch Date": launch_text or "Not published",
+            "Target Start": expected.date().isoformat(),
             "First Stored Date": first.date().isoformat(),
             "Last Stored Date": last.date().isoformat(),
             "Candles": int(len(dates)), "Internal Gaps (>7d)": gaps,
             "Invalid OHLC Rows": invalid_ohlc_rows,
             "Close Moves >15%": large_close_moves,
-            "Start Covered": bool(start_ok), "Recent Data": bool(recent_ok),
-            "Coverage Status": status,
+            "Start Covered": bool(start_ok), "Launch Covered": launch_ok,
+            "Recent Data": bool(recent_ok), "Coverage Status": status,
         })
     return pd.DataFrame(records)
 
