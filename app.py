@@ -1123,7 +1123,21 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
     required_lookback += int(strat_config.get("skip_days", 0)) + 2
     previous_dates = prices_df.index[prices_df.index < simulation_dates[0]]
     if len(previous_dates) < required_lookback:
+        st.error(
+            f"Backtest stopped: only {len(previous_dates)} warm-up sessions are available before "
+            f"{simulation_dates[0].date()}, but this strategy needs {required_lookback}. "
+            "Choose a later start date or complete the missing historical downloads."
+        )
         return None, None, None
+    for ticker in dict.fromkeys(required_benchmarks):
+        benchmark_history = raw_prices[ticker].dropna()
+        bars_before_start = benchmark_history.loc[benchmark_history.index < simulation_dates[0]]
+        if len(bars_before_start) < required_lookback:
+            st.error(
+                f"Backtest stopped: {ticker} has only {len(bars_before_start)} valid stored candles "
+                f"before the start date; {required_lookback} are required for this strategy's lookbacks."
+            )
+            return None, None, None
 
     # Mark the portfolio to market every trading day. Momentum signals are
     # computed using the previous session's close and changes take effect at
@@ -1212,9 +1226,17 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                                 current_cash -= qty * price
                 elif (
                     strat_config.get("use_market_trend_filter", False)
-                    and strat_config.get("market_trend_exit_on_bearish", True)
                     and not _market_trend_is_bullish(strat_config, as_of_date=signal_dt)
                 ):
+                    # Honour the user setting: hold during bearish periods when
+                    # exit-on-bearish is disabled; otherwise move to cash.
+                    if strat_config.get("market_trend_exit_on_bearish", True):
+                        current_holdings = {}
+                        current_cash = daily_value
+                else:
+                    # An empty target during a non-bearish rebalance means none
+                    # of the assets passed the configured rules. Do not silently
+                    # keep old holdings that no longer qualify.
                     current_holdings = {}
                     current_cash = daily_value
 
@@ -1286,6 +1308,31 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
             "and configure GITHUB_ACTIONS_TOKEN in Streamlit Secrets once so the login-triggered workflow "
             "can download and commit the historical files."
         )
+    st.markdown("#### Index History Coverage Audit")
+    index_coverage = index_history_data.get_index_history_coverage()
+    st.dataframe(
+        index_coverage[
+            ["Index", "Target Start", "First Stored Date", "Last Stored Date",
+             "Candles", "Internal Gaps (>7d)", "Coverage Status"]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+    if index_coverage.empty or (index_coverage["Coverage Status"] == "MISSING").any():
+        st.warning(
+            "One or more required index history files are missing. The app cannot claim that index data "
+            "covers the full target history until those files are downloaded."
+        )
+    elif (~index_coverage["Start Covered"]).any():
+        st.warning(
+            "One or more index histories start after their configured earliest target. FYERS Standard API "
+            "history is limited to the last 5 years; full inception backfills need older history access, "
+            "and API availability must be verified per index."
+        )
+    st.caption(
+        "The audit checks first/last dates and long calendar gaps. It does not verify each OHLC value against "
+        "the official exchange record. Index level history also differs from total-return history."
+    )
     st.link_button(
         "Open FYERS Historical Data Workflow",
         "https://github.com/nishantbhandari09/nse-momentum-portfolio/actions/workflows/update-index-history.yml",
@@ -1897,6 +1944,10 @@ elif st.session_state.navigation_tab == "BACKTEST":
     run_bt_btn = st.button("📊 Run Strategy Backtest Simulation", type="primary", use_container_width=True)
 
     if run_bt_btn:
+        # The archive can be committed by GitHub Actions between Streamlit runs.
+        # Clear the one-hour price cache before each backtest so it reads the
+        # latest saved history rather than a stale in-memory matrix.
+        fetch_market_data.clear()
         with st.spinner("Running historical rebalance simulation against market data..."):
             bt_results, holdings_history, bt_prices_df = run_backtest_simulation(
                 bt_strat_config, initial_cap, start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d"),
