@@ -1343,7 +1343,8 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
     st.dataframe(
         index_coverage[
             ["Index", "Target Start", "First Stored Date", "Last Stored Date",
-             "Candles", "Internal Gaps (>7d)", "Coverage Status"]
+             "Candles", "Internal Gaps (>7d)", "Invalid OHLC Rows",
+             "Close Moves >15%", "Coverage Status"]
         ],
         use_container_width=True,
         hide_index=True,
@@ -1360,8 +1361,10 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
             "and API availability must be verified per index."
         )
     st.caption(
-        "The audit checks first/last dates and long calendar gaps. It does not verify each OHLC value against "
-        "the official exchange record. Index level history also differs from total-return history."
+        "The audit checks date range, long calendar gaps, OHLC validity and unusually large close changes. "
+        "It does not verify every value against the official exchange record. Index level history also differs "
+        "from total-return history; the target dates are coverage targets, not a guarantee that every index "
+        "was officially live on that exact date."
     )
     st.link_button(
         "Open FYERS Historical Data Workflow",
