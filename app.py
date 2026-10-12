@@ -1035,6 +1035,51 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             required_benchmarks.append(trend_ticker)
     tickers = list(dict.fromkeys(tickers + required_benchmarks))
 
+    # At the start of each backtest, check inception coverage for the actual
+    # index universe/benchmarks used by this strategy, not just the requested
+    # date range. Full inception coverage and exact price-value validation are
+    # distinct from having enough candles for a shorter recent backtest.
+    relevant_index_names = {
+        group for group in selected_groups
+        if group in index_history_data.INDEX_HISTORY_SPECS
+    }
+    relevant_index_names.update(
+        index_history_data.TICKER_TO_INDEX_NAME[ticker]
+        for ticker in required_benchmarks
+        if ticker in index_history_data.TICKER_TO_INDEX_NAME
+    )
+    if relevant_index_names:
+        inception_audit = index_history_data.get_index_history_coverage()
+        if not inception_audit.empty:
+            incomplete_inception = []
+            for index_name in sorted(relevant_index_names):
+                row_match = inception_audit.loc[inception_audit["Index"] == index_name]
+                if row_match.empty:
+                    incomplete_inception.append(f"{index_name}: no coverage audit row")
+                    continue
+                audit_row = row_match.iloc[0]
+                if not bool(audit_row.get("Start Covered", False)):
+                    incomplete_inception.append(
+                        f"{index_name}: first saved candle {audit_row.get('First Stored Date') or 'missing'}; "
+                        f"target start {audit_row.get('Target Start')}"
+                    )
+                elif int(pd.to_numeric(audit_row.get("Internal Gaps (>7d)", 0), errors="coerce") or 0) > 0:
+                    incomplete_inception.append(
+                        f"{index_name}: has calendar gaps longer than 7 days"
+                    )
+                elif int(pd.to_numeric(audit_row.get("Invalid OHLC Rows", 0), errors="coerce") or 0) > 0:
+                    incomplete_inception.append(
+                        f"{index_name}: has invalid OHLC rows"
+                    )
+            if incomplete_inception:
+                st.warning(
+                    "Index inception/data-quality check: the stored history for this strategy is not "
+                    "confirmed complete from the configured earliest target. "
+                    + "; ".join(incomplete_inception)
+                    + ". A shorter backtest can only be trusted if its date-range and warm-up checks pass; "
+                    "full historical coverage and value-by-value exchange validation are not yet established."
+                )
+
     start_ts = pd.Timestamp(start_date).normalize()
     end_ts = pd.Timestamp(end_date).normalize()
     today = pd.Timestamp.now().normalize()
