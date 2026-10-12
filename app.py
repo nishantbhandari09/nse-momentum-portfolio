@@ -1064,6 +1064,13 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                         f"target start {audit_row.get('Target Start')}"
                     )
                 else:
+                    launch_text = str(audit_row.get("Launch Date", "") or "")
+                    if launch_text and launch_text != "Not published" and not bool(
+                        audit_row.get("Launch Covered", False)
+                    ):
+                        incomplete_inception.append(
+                            f"{index_name}: stored candles do not reach verified launch date {launch_text}"
+                        )
                     gap_count = pd.to_numeric(
                         audit_row.get("Internal Gaps (>7d)", 0), errors="coerce"
                     )
@@ -1447,9 +1454,9 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
     index_coverage = index_history_data.get_index_history_coverage()
     st.dataframe(
         index_coverage[
-            ["Index", "Target Start", "First Stored Date", "Last Stored Date",
+            ["Index", "Launch Date", "Target Start", "First Stored Date", "Last Stored Date",
              "Candles", "Internal Gaps (>7d)", "Invalid OHLC Rows",
-             "Close Moves >15%", "Coverage Status"]
+             "Close Moves >15%", "Launch Covered", "Coverage Status"]
         ],
         use_container_width=True,
         hide_index=True,
@@ -1466,10 +1473,11 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
             "and API availability must be verified per index."
         )
     st.caption(
-        "The audit checks date range, long calendar gaps, OHLC validity and unusually large close changes. "
-        "It does not verify every value against the official exchange record. Index level history also differs "
-        "from total-return history; the target dates are coverage targets, not a guarantee that every index "
-        "was officially live on that exact date."
+        "Launch dates are shown separately from base/history target dates. Some index series have a calculated "
+        "base-date history before formal launch; current official factsheets do not publish a launch date for "
+        "every series. The audit checks date coverage, long gaps, OHLC validity and unusually large close changes, "
+        "but does not reconcile every value against the official exchange record. Index level history also differs "
+        "from total-return history."
     )
     st.link_button(
         "Open FYERS Historical Data Workflow",
