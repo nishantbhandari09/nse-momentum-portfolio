@@ -432,26 +432,48 @@ def get_live_prices(yf_tickers):
     try:
         fyers = get_fyers_client()
     except Exception:
-        st.session_state["_fyers_status"] = str(Exception)
+        st.session_state["_fyers_status"] = "not connected in this session"
         return {}
 
     fyers_symbols = {t: "NSE:" + t.replace(".NS", "") + "-EQ" for t in yf_tickers}
-    try:
-        response = fyers.quotes({"symbols": ",".join(fyers_symbols.values())})
-    except Exception as e:
-        st.session_state["_fyers_status"] = f"request failed ({e})"
-        return {}
+    by_symbol = {}
+    failures = []
+    # FYERS Standard allows up to 50 symbols per Quotes request. Batching also
+    # prevents Nifty 500 scans from failing as one oversized all-symbol request.
+    symbols = list(fyers_symbols.values())
+    for offset in range(0, len(symbols), 50):
+        batch = symbols[offset:offset + 50]
+        try:
+            response = fyers.quotes({"symbols": ",".join(batch)})
+        except Exception as exc:
+            failures.append(f"batch {offset // 50 + 1}: request failed ({exc})")
+            continue
+        if not isinstance(response, dict) or response.get("s") != "ok":
+            failures.append(f"batch {offset // 50 + 1}: FYERS did not return a successful quote response")
+            continue
+        for item in response.get("d", []):
+            symbol = item.get("n")
+            value = item.get("v", {}).get("lp")
+            if symbol and value is not None:
+                try:
+                    price = float(value)
+                    if np.isfinite(price) and price > 0:
+                        by_symbol[symbol] = price
+                except (TypeError, ValueError):
+                    continue
 
-    if response.get("s") != "ok":
-        st.session_state["_fyers_status"] = f"request failed ({response})"
+    if not by_symbol:
+        st.session_state["_fyers_status"] = "; ".join(failures) or "no live quotes returned"
         return {}
-
-    st.session_state["_fyers_status"] = "live"
-    by_symbol = {item.get("n"): item.get("v", {}).get("lp") for item in response.get("d", [])}
+    st.session_state["_fyers_status"] = (
+        f"live ({len(by_symbol)}/{len(fyers_symbols)} symbols)"
+        if not failures and len(by_symbol) == len(fyers_symbols)
+        else f"partial live quotes ({len(by_symbol)}/{len(fyers_symbols)} symbols)"
+    )
     return {
         ticker: by_symbol[sym]
         for ticker, sym in fyers_symbols.items()
-        if by_symbol.get(sym) is not None
+        if sym in by_symbol
     }
 
 
