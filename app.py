@@ -807,36 +807,81 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         filtered_df = filtered_df[eligible_cols]
 
     if strat.get("use_rs", True):
-        if NIFTY_REGIME_TICKER in prices_df.columns and GSEC_REGIME_TICKER in prices_df.columns:
-            rs_ratio = prices_df[NIFTY_REGIME_TICKER] / prices_df[GSEC_REGIME_TICKER]
-            rs_sma = rs_ratio.rolling(window=50).mean()
-            if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
-                return [ASSET_GROUPS_MAPPING["Gov Bond"][0]]
+        rs_benchmark = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
+        if rs_benchmark == "Nifty 50 / Liquid ETF":
+            rs_index_ticker = "^NSEI"
+            rs_defensive_ticker = "LIQUIDBEES.NS"
+        else:
+            rs_index_ticker = NIFTY_REGIME_TICKER
+            rs_defensive_ticker = GSEC_REGIME_TICKER
 
-    periods = strat.get("period_days", [252, 120, 60])
-    weights = strat.get("period_weights", [0.5, 0.3, 0.2])
-    skip_days = strat.get("skip_days", 0)
+        # A missing/stale benchmark must not silently disable the regime rule.
+        if rs_index_ticker not in prices_df.columns or rs_defensive_ticker not in prices_df.columns:
+            return []
+        rs_index = prices_df[rs_index_ticker].dropna()
+        rs_defensive = prices_df[rs_defensive_ticker].dropna()
+        if as_of_date is not None:
+            cutoff = pd.Timestamp(as_of_date)
+            rs_index = rs_index.loc[:cutoff]
+            rs_defensive = rs_defensive.loc[:cutoff]
+        rs_ratio = rs_index.div(rs_defensive.replace(0, np.nan)).dropna()
+        rs_sma = rs_ratio.rolling(window=50, min_periods=50).mean()
+        if rs_ratio.empty or pd.isna(rs_sma.iloc[-1]):
+            return []
+        if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
+            return [rs_defensive_ticker]
 
-    if len(weights) < len(periods):
-        weights = [1.0 / len(periods)] * len(periods)
-
-    weights = np.array(weights[:len(periods)], dtype=float)
-    weights /= weights.sum()
+    periods = [int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0]
+    raw_weights = strat.get("period_weights", [0.5, 0.3, 0.2])
+    weights = np.asarray(raw_weights, dtype=float).flatten()
+    if len(weights) != len(periods) or not np.isfinite(weights).all() or (weights < 0).any() or weights.sum() <= 0:
+        weights = np.ones(len(periods), dtype=float)
+    weights = weights / weights.sum()
+    skip_days = max(0, int(strat.get("skip_days", 0)))
 
     end_idx = -1 - skip_days
     rank_components = []
-    for p in periods:
-        start_idx = end_idx - p
-        if len(filtered_df) > abs(start_idx):
-            returns = (filtered_df.iloc[end_idx] / filtered_df.iloc[start_idx] - 1).dropna()
-            rank_components.append(returns.rank(ascending=False, method="min"))
+    component_weights = []
+    for period, weight in zip(periods, weights):
+        start_idx = end_idx - period
+        if len(filtered_df) <= abs(start_idx):
+            continue
+        start_prices = filtered_df.iloc[start_idx]
+        end_prices = filtered_df.iloc[end_idx]
+        valid = (
+            start_prices.notna()
+            & end_prices.notna()
+            & np.isfinite(start_prices)
+            & np.isfinite(end_prices)
+            & start_prices.gt(0)
+        )
+        returns = (end_prices[valid] / start_prices[valid]) - 1.0
+        returns = returns.replace([np.inf, -np.inf], np.nan).dropna()
+        if returns.empty:
+            continue
+        rank_components.append(returns.rank(ascending=False, method="min"))
+        component_weights.append(float(weight))
 
-    entry_n = strat.get("entry_rank", 10)
+    entry_n = int(strat.get("entry_rank", 10))
 
+    # Never fall back to column order when there is insufficient history.
+    # A symbol must have a valid return for every configured period that is
+    # included in the composite score; missing periods cannot give it an
+    # artificially low (better) weighted rank.
     if not rank_components:
-        return list(filtered_df.columns[:entry_n])
+        return []
 
-    composite_rank = pd.concat(rank_components, axis=1).mul(weights, axis=1).sum(axis=1).sort_values()
+    rank_frame = pd.concat(rank_components, axis=1)
+    complete_rank_frame = rank_frame.dropna(axis=0, how="any")
+    if complete_rank_frame.empty:
+        return []
+    active_weights = np.asarray(component_weights, dtype=float)
+    active_weights = active_weights / active_weights.sum()
+    composite_rank = (
+        complete_rank_frame.mul(active_weights, axis=1)
+        .sum(axis=1)
+        .sort_values()
+    )
 
     ordinal_rank = pd.Series(range(1, len(composite_rank) + 1), index=composite_rank.index)
     exit_n = max(strat.get("exit_rank", entry_n), entry_n)
