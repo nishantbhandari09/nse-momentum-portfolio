@@ -55,6 +55,12 @@ Do not raise the request budget or speed unless your account's actual API rate l
 
 The downloaded daily OHLCV values are the candles returned by FYERS. They are not Yahoo Finance `auto_adjust` prices. Daily candles improve provider consistency, but price history alone does not guarantee total-return accuracy: verify FYERS' treatment of split/bonus adjustments and dividends before relying on long-period returns. The current portfolio simulator also does not automatically add dividend cash flows, brokerage, taxes, slippage, or market-impact costs. Those items can change CAGR, total return and maximum drawdown.
 
+The app now audits index files for coverage dates, long calendar gaps, invalid OHLC rows and large close-to-close moves. This is a **data-quality screen, not a full price-by-price reconciliation against NSE/Nifty Indices**. A file can have the correct first and last dates while still contain wrong prices or missing trading sessions.
+
+Before presenting a backtest, the app checks that required benchmark history covers the selected dates and enough warm-up sessions are present. It stops instead of silently shifting a requested start date if required history is missing or stale. The scanner also refuses to give a better rank to a stock merely because one of its lookback returns is missing. Carried-forward closes are now limited; if a currently held security goes unpriceable, the backtest stops instead of assuming it stays flat forever.
+
+The app flags single-session stock price moves of 25% or more for review. They may be legitimate, but can also indicate unadjusted splits, bonuses or other corporate actions; these require independent validation. Until corporate actions/delisting proceeds and any required price adjustments are incorporated, long-period backtest returns and drawdown must be treated as provisional.
+
 Historical index membership is separate from price data. `data/index_membership_history.csv` is reconstructed external data; attribution, source and gaps are documented in `data/INDEX_DATA_SOURCES.md`. Exact constituent histories are not available for every index/date, especially pre-2018; Nifty 200 can use a wider Nifty 500 membership proxy. Therefore, using FYERS prices does not by itself remove survivorship bias.
 
 ## Inspect progress
