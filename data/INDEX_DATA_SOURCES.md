@@ -10,6 +10,19 @@ Official API references:
 - FYERS data/history endpoint and candle format: https://github.com/FyersDev/fyers-skills/blob/master/skills/fyers-trading/references/market-data.md
 - FYERS Standard/Prime history range and API limits: https://support.fyers.in/portal/en/kb/articles/what-are-the-fyers-api-rate-limits-for-standard-and-prime-plans
 
+## Index launch dates and requested history start
+
+The app keeps the **formal launch date** separate from the **earliest requested history date**. Some Nifty indices have a base/history series before the formal launch date; that earlier history is not the same as live index history. The coverage audit shows both dates and checks whether the saved file reaches the target. A complete date range still does not prove every close is numerically identical to NSE Indices' record.
+
+Official Nifty Indices factsheets used for the launch dates currently published:
+- [Nifty 50](https://www.niftyindices.com/Factsheet/ind_nifty50.pdf): launch April 22, 1996.
+- [Nifty Bank](https://www.niftyindices.com/Factsheet/ind_nifty_bank.pdf): launch September 15, 2003; base date January 1, 2000.
+- [Nifty 200](https://www.niftyindices.com/Factsheet/ind_nifty_200.pdf): launch July 19, 2011; base date January 1, 2004.
+- [Nifty Pharma](https://niftyindices.com/Factsheet/ind_nifty_pharma.pdf): launch July 1, 2005; base date January 1, 2001.
+- [Nifty Auto](https://www.niftyindices.com/Factsheet/ind_nifty_auto.pdf) and [Nifty Metal](https://www.niftyindices.com/Factsheet/ind_nifty_metal.pdf): launch July 12, 2011; base date January 1, 2004.
+- [Nifty FMCG](https://www.niftyindices.com/Factsheet/ind_nifty_FMCG.pdf): launch September 22, 1999; base date January 1, 1996.
+- The current [Nifty 500](https://www.niftyindices.com/Factsheet/ind_nifty_500.pdf) and [Nifty IT](https://niftyindices.com/Factsheet/ind_nifty_it.pdf) factsheets leave the launch-date field blank. The app labels these as “Not published” rather than guessing.
+
 ## Historical index membership
 
 `data/index_membership_history.csv` is a reconstructed constituent-membership ledger from the open-source project aditya-jha/nse-historical-membership. Membership is separate from the price source; FYERS candles do not provide the dates when historical index constituents entered or left an index.
