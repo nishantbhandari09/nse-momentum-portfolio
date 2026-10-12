@@ -139,6 +139,7 @@ def get_index_history_coverage(today=None, max_stale_days=10):
                 "Index": name, "Target Start": expected.date().isoformat(),
                 "First Stored Date": None, "Last Stored Date": None,
                 "Candles": 0, "Internal Gaps (>7d)": None,
+                "Invalid OHLC Rows": None, "Close Moves >15%": None,
                 "Start Covered": False, "Recent Data": False,
                 "Coverage Status": "MISSING",
             })
