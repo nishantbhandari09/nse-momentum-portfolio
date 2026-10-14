@@ -805,6 +805,117 @@ def main():
         if client.request_count and client.request_count % 100 == 0:
             print(f"Recent refresh progress: {client.request_count}/{max_requests} requests; {ticker} now has {len(old)} candles.")
 
+    # Priority backfill: complete the Nifty 500 index-level series first.
+    # This is a separate index series, not the 500 stock constituents. It is
+    # requested from the official base date (1995-01-01) in <=366-day chunks,
+    # before the request budget is spent on all other stock/ETF archives.
+    nifty500_ticker = "^CRSLDX"
+    if nifty500_ticker in universe and client.request_count < max_requests:
+        nifty500_api_symbol = ticker_to_api.get(nifty500_ticker) or api_symbol_for(nifty500_ticker)
+        ticker_to_api[nifty500_ticker] = nifty500_api_symbol
+        nifty500_floor = history_floor_for(nifty500_ticker)
+        frame = get_frame(nifty500_ticker)
+        index_entry = run_manifest.get(nifty500_ticker, {})
+        cursor_text = str(index_entry.get("Next Backfill End", "") or "").strip()
+
+        if frame.empty and cursor_text:
+            backfill_end = date.fromisoformat(cursor_text)
+        elif not frame.empty:
+            backfill_end = pd.to_datetime(frame["Date"], errors="coerce").min().date() - timedelta(days=1)
+        else:
+            backfill_end = today
+
+        while client.request_count < max_requests:
+            if not frame.empty:
+                first_saved = pd.to_datetime(frame["Date"], errors="coerce").min().date()
+                if first_saved <= nifty500_floor:
+                    run_manifest[nifty500_ticker] = manifest_row(
+                        nifty500_ticker, nifty500_api_symbol, "Index", frame,
+                        True, "ok", "Configured Nifty 500 base date reached.",
+                    )
+                    save_manifest(run_manifest)
+                    break
+                backfill_end = first_saved - timedelta(days=1)
+
+            from_date = max(nifty500_floor, backfill_end - timedelta(days=365))
+            try:
+                older, outcome, message = process_request(nifty500_ticker, from_date, backfill_end)
+            except HistoryRateLimit:
+                stop_reason = "FYERS request budget reached during priority Nifty 500 backfill"
+                break
+
+            if outcome == "rate_limit":
+                stop_reason = f"FYERS rate limit during priority Nifty 500 backfill: {message}"
+                break
+            if outcome == "error":
+                failures.append({
+                    "App Ticker": nifty500_ticker,
+                    "FYERS Symbol": nifty500_api_symbol,
+                    "Stage": "Nifty 500 priority backfill",
+                    "Message": message,
+                })
+                run_manifest[nifty500_ticker] = manifest_row(
+                    nifty500_ticker, nifty500_api_symbol, "Index", frame,
+                    False, "retry", message,
+                    next_backfill_end=backfill_end.isoformat(),
+                )
+                save_manifest(run_manifest)
+                break
+            if outcome == "empty":
+                # An empty old window may mean the account's history entitlement
+                # stops here. Record the actual first date and let the coverage
+                # audit prove that inception has not been reached.
+                run_manifest[nifty500_ticker] = manifest_row(
+                    nifty500_ticker, nifty500_api_symbol, "Index", frame,
+                    True, "oldest available",
+                    f"FYERS returned no Nifty 500 candles for {from_date} to {backfill_end}. "
+                    f"Earliest saved date is {pd.to_datetime(frame['Date'], errors='coerce').min().date() if not frame.empty else 'none'}; "
+                    "check the index coverage audit before treating the backfill as inception-complete. "
+                    + str(message or ""),
+                )
+                save_manifest(run_manifest)
+                break
+
+            merged = merge_and_write(nifty500_ticker, frame, older)
+            if merged.empty:
+                run_manifest[nifty500_ticker] = manifest_row(
+                    nifty500_ticker, nifty500_api_symbol, "Index", frame,
+                    False, "retry", "API returned success but no usable Nifty 500 candles were parsed.",
+                    next_backfill_end=backfill_end.isoformat(),
+                )
+                save_manifest(run_manifest)
+                break
+
+            new_first = pd.to_datetime(merged["Date"], errors="coerce").min().date()
+            old_first = (
+                pd.to_datetime(frame["Date"], errors="coerce").min().date()
+                if not frame.empty else None
+            )
+            frame = merged
+            local_frames[nifty500_ticker] = merged
+            reached_base = new_first <= nifty500_floor
+            run_manifest[nifty500_ticker] = manifest_row(
+                nifty500_ticker, nifty500_api_symbol, "Index", merged,
+                reached_base, "ok",
+                "Configured Nifty 500 base date reached." if reached_base else "",
+            )
+            save_manifest(run_manifest)
+            print(
+                f"Nifty 500 priority backfill: {new_first} to {pd.to_datetime(merged['Date'], errors='coerce').max().date()} "
+                f"({len(merged)} candles; {client.request_count}/{max_requests} API requests)."
+            )
+            if reached_base:
+                break
+            if old_first is not None and new_first >= old_first:
+                run_manifest[nifty500_ticker] = manifest_row(
+                    nifty500_ticker, nifty500_api_symbol, "Index", merged,
+                    False, "retry", "Nifty 500 backfill made no backward progress.",
+                    next_backfill_end=(new_first - timedelta(days=1)).isoformat(),
+                )
+                save_manifest(run_manifest)
+                break
+            backfill_end = new_first - timedelta(days=1)
+
     # Phase 2: backfill older history fairly, one <=366-day chunk per symbol per
     # pass. Re-running the workflow resumes from each file's earliest stored date.
     backfill_failed_this_run = set()
