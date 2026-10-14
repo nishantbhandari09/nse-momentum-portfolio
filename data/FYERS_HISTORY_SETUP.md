@@ -33,9 +33,11 @@ The Streamlit app and GitHub Actions are separate runtimes. To make the historic
    ```
    Save the setting, disconnect FYERS in the app, and connect again.
 
-After this one-time setup, each successful login from the authorized account automatically updates the GitHub Actions secrets `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN`, then triggers **Update FYERS Historical Price Database**. The account check prevents other visitors to the publicly accessible app from overwriting your updater credentials. No separate FYERS PIN or refresh-token secret is required for this login-triggered flow. The access token is short-lived, so the updater runs using the fresh token sent after each login. Do not manually start a run days later and expect an old token to remain valid; log in again first.
+After this one-time setup, each successful login from the authorized account automatically updates the GitHub Actions secrets `FYERS_APP_ID` and `FYERS_ACCESS_TOKEN`, then triggers **Update FYERS Historical Price Database**. The account check prevents other visitors to the publicly accessible app from overwriting your updater credentials. No separate FYERS PIN is required for this login-triggered flow.
 
-If live quotes are available, the connected app fetches them from your current FYERS session while scanning and valuing holdings. The history workflow separately downloads available daily OHLCV candles and commits the progress to `data/fyers_history/`, `data/index_prices/` and the manifest. It may take multiple runs to complete large historical backfills.
+A weekday end-of-day refresh is now scheduled for **4:45 pm IST**. FYERS states that daily 2FA is required and the access token expires at 6:30 am the following day; the refresh-token session flow is no longer supported under the rules effective April 1, 2026. Therefore, for the scheduled refresh to work, you must log into FYERS from this app on that same trading day. The app cannot silently renew the token in the background or bypass FYERS daily authentication. If no fresh login occurred that day, the scheduled workflow will fail authentication rather than download using invalid credentials. Sources: https://support.fyers.in/portal/en/kb/articles/what-are-the-new-sebi-rules-for-retail-algo-trading-from-april-01-2026 and https://fyers.in/notice-board/new-sebi-framework-for-retail-algo-trading-from-april-01-2026.
+
+If live quotes are available, the connected app fetches them from your current FYERS session while scanning and valuing holdings. The history workflow separately downloads daily OHLCV candles and commits progress to `data/fyers_history/`, `data/index_prices/` and the manifest. The Nifty 500 index itself is prioritized for backfill to its official base date, **January 1, 1995**, in chunks of no more than 366 days. Its configured base date is supported by the official Nifty 500 whitepaper: https://www.niftyindices.com/docs/default-source/indices/nifty-500/nifty-500-whitepaper_2025.pdf. The updater records the first date actually returned; it never treats a recent five-year file as full inception coverage.
 
 If the app reports that the update could not be triggered, check that the GitHub token is limited to this repository and has the two permissions above. The login and live-quote connection can still work even while historical saving is not configured.
 
@@ -43,11 +45,11 @@ If the app reports that the update could not be triggered, check that the GitHub
 
 FYERS' current support page says daily history is limited to the last 5 years on the Standard plan and provides the full available daily history (20+ years) on Prime. The history endpoint allows up to 366 calendar days in one daily-history request. Source: https://support.fyers.in/portal/en/kb/articles/what-are-the-fyers-api-rate-limits-for-standard-and-prime-plans and https://github.com/FyersDev/fyers-skills/blob/master/skills/fyers-trading/references/market-data.md.
 
-The updater is conservative for the Standard plan: `FYERS_MAX_REQUESTS_PER_RUN=4500` and `FYERS_REQUEST_DELAY_SECONDS=1.25`. The updater backfills a limited number of chunks per run, so a large universe is filled over multiple workflow runs. After confirming an eligible Prime plan, faster settings can be added as GitHub Actions Variables:
+The updater uses `FYERS_MAX_REQUESTS_PER_RUN=4500` and `FYERS_REQUEST_DELAY_SECONDS=1.25`. It first spends available requests on the Nifty 500 index history, then continues backfilling the larger stock/ETF universe. The updater backfills a limited number of chunks per run, so the broader universe can take multiple workflow runs. After confirming that your account plan and API limits permit higher throughput, faster settings can be added as GitHub Actions Variables:
 
 - `FYERS_MAX_REQUESTS_PER_RUN=20000`
 - `FYERS_REQUEST_DELAY_SECONDS=0.15`
-- `FYERS_HISTORY_START_DATE=1990-01-01` (optional override for Prime / older-history entitlement; without this variable the updater probes the plan's accessible history)
+- The workflow currently requests from a general floor of `1990-01-01`; per-index target dates still apply, including Nifty 500 from `1995-01-01`. An early request does not grant older-history entitlement: Standard accounts may return only the most recent five years.
 
 Do not raise the request budget or speed unless your account's actual API rate limits allow it. The updater records pending/error/no-history statuses in the manifest; it does not claim an instrument has history when FYERS returns no usable candles.
 
