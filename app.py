@@ -391,8 +391,10 @@ def render_fyers_connection_panel():
             if connected_at:
                 st.caption(f"Connected at {connected_at}")
             st.caption(
-                "Historical downloads are triggered automatically after login once "
-                "GITHUB_ACTIONS_TOKEN has been configured in Streamlit Secrets. No FYERS PIN is required."
+                "A login from this app starts a history refresh, and a second refresh is scheduled "
+                "for 4:45 pm IST on weekdays. FYERS access tokens expire at 6:30 am the following day, "
+                "so you must log in from this app on each trading day for that day's EOD refresh to work. "
+                "The app does not automate or bypass FYERS daily 2FA."
             )
             if st.button("Disconnect FYERS"):
                 st.session_state.pop("fyers_access_token", None)
