@@ -1173,6 +1173,26 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             long_gaps = selected_period.index.to_series().diff().dropna()
             if (long_gaps > pd.Timedelta(days=7)).any():
                 coverage_errors.append(f"{ticker}: one or more gaps longer than 7 calendar days in the requested range")
+        # NSE indices share the same trading calendar where their history
+        # overlaps. If a required index series misses dates present in Nifty 50,
+        # do not forward-fill through those missing benchmark sessions.
+        if ticker.startswith("^") and ticker != "^NSEI" and "^NSEI" in raw_prices.columns:
+            reference = raw_prices["^NSEI"].dropna()
+            if not reference.empty and not series.empty:
+                overlap_start = max(start_ts, reference.index.min(), series.index.min())
+                overlap_end = min(end_ts, reference.index.max(), series.index.max())
+                if overlap_start <= overlap_end:
+                    ref_dates = set(reference.loc[
+                        (reference.index >= overlap_start) & (reference.index <= overlap_end)
+                    ].index)
+                    ticker_dates = set(series.loc[
+                        (series.index >= overlap_start) & (series.index <= overlap_end)
+                    ].index)
+                    missing_sessions = len(ref_dates - ticker_dates)
+                    if missing_sessions:
+                        coverage_errors.append(
+                            f"{ticker}: missing {missing_sessions} sessions compared with Nifty 50 in the selected range"
+                        )
     if coverage_errors:
         st.error(
             "Backtest stopped because a required benchmark failed the history-coverage check:\n\n"
