@@ -1076,6 +1076,9 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                     gap_count = pd.to_numeric(
                         audit_row.get("Internal Gaps (>7d)", 0), errors="coerce"
                     )
+                    missing_sessions = pd.to_numeric(
+                        audit_row.get("Missing Sessions vs Nifty 50", 0), errors="coerce"
+                    )
                     invalid_ohlc_count = pd.to_numeric(
                         audit_row.get("Invalid OHLC Rows", 0), errors="coerce"
                     )
@@ -1083,7 +1086,11 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                         incomplete_inception.append(
                             f"{index_name}: has calendar gaps longer than 7 days"
                         )
-                    elif pd.notna(invalid_ohlc_count) and int(invalid_ohlc_count) > 0:
+                    if pd.notna(missing_sessions) and int(missing_sessions) > 0:
+                        incomplete_inception.append(
+                            f"{index_name}: misses {int(missing_sessions)} trading session(s) versus Nifty 50"
+                        )
+                    if pd.notna(invalid_ohlc_count) and int(invalid_ohlc_count) > 0:
                         incomplete_inception.append(
                             f"{index_name}: has invalid OHLC rows"
                         )
@@ -1457,8 +1464,8 @@ with st.expander("📚 FYERS Historical Data Status", expanded=False):
     st.dataframe(
         index_coverage[
             ["Index", "Launch Date", "Target Start", "First Stored Date", "Last Stored Date",
-             "Candles", "Internal Gaps (>7d)", "Invalid OHLC Rows",
-             "Close Moves >15%", "Launch Covered", "Coverage Status"]
+             "Candles", "Internal Gaps (>7d)", "Missing Sessions vs Nifty 50",
+             "Invalid OHLC Rows", "Close Moves >15%", "Launch Covered", "Coverage Status"]
         ],
         use_container_width=True,
         hide_index=True,
