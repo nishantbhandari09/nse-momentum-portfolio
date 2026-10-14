@@ -130,6 +130,11 @@ def get_index_history_coverage(today=None, max_stale_days=10):
     against an official exchange file.
     """
     today = pd.Timestamp(today or pd.Timestamp.now().date()).normalize()
+    reference = load_index_ohlc("^NSEI")
+    reference_dates = (
+        pd.DatetimeIndex(pd.to_datetime(reference["Date"], errors="coerce").dropna().dt.normalize().unique()).sort_values()
+        if not reference.empty else pd.DatetimeIndex([])
+    )
     records = []
     for name, spec in INDEX_HISTORY_SPECS.items():
         frame = load_index_ohlc(spec["ticker"])
@@ -141,6 +146,7 @@ def get_index_history_coverage(today=None, max_stale_days=10):
                 "Target Start": expected.date().isoformat(),
                 "First Stored Date": None, "Last Stored Date": None,
                 "Candles": 0, "Internal Gaps (>7d)": None,
+                "Missing Sessions vs Nifty 50": None,
                 "Invalid OHLC Rows": None, "Close Moves >15%": None,
                 "Start Covered": False,
                 "Launch Covered": False if str(spec.get("launch_date") or "").strip() else None,
@@ -158,6 +164,23 @@ def get_index_history_coverage(today=None, max_stale_days=10):
             launch_ok = None
         recent_ok = (today - last).days <= max_stale_days
         gaps = int((dates.diff().dropna() > pd.Timedelta(days=7)).sum())
+        missing_vs_nifty50 = None
+        if spec["ticker"] == "^NSEI":
+            missing_vs_nifty50 = 0
+        elif len(reference_dates):
+            # All supported series are NSE indices and should share the same
+            # trading sessions where their histories overlap. Compare dates
+            # as an independent coverage check; this does not validate values.
+            overlap_start = max(first, reference_dates[0])
+            overlap_end = min(last, reference_dates[-1])
+            if overlap_start <= overlap_end:
+                expected_dates = set(
+                    reference_dates[(reference_dates >= overlap_start) & (reference_dates <= overlap_end)]
+                )
+                actual_dates = set(
+                    dates[(dates >= overlap_start) & (dates <= overlap_end)]
+                )
+                missing_vs_nifty50 = int(len(expected_dates - actual_dates))
         ohlc = frame.reindex(columns=["Open", "High", "Low", "Close"])
         valid_ohlc = (
             ohlc.notna().all(axis=1)
@@ -179,6 +202,8 @@ def get_index_history_coverage(today=None, max_stale_days=10):
             status = f"CHECK — {invalid_ohlc_rows} invalid OHLC row(s)"
         elif gaps:
             status = f"CHECK — {gaps} gap(s) over 7 days"
+        elif pd.notna(missing_vs_nifty50) and int(missing_vs_nifty50) > 0:
+            status = f"CHECK — {int(missing_vs_nifty50)} session(s) missing vs Nifty 50"
         elif large_close_moves:
             status = f"REVIEW — {large_close_moves} close move(s) over 15%"
         else:
@@ -190,6 +215,7 @@ def get_index_history_coverage(today=None, max_stale_days=10):
             "First Stored Date": first.date().isoformat(),
             "Last Stored Date": last.date().isoformat(),
             "Candles": int(len(dates)), "Internal Gaps (>7d)": gaps,
+            "Missing Sessions vs Nifty 50": missing_vs_nifty50,
             "Invalid OHLC Rows": invalid_ohlc_rows,
             "Close Moves >15%": large_close_moves,
             "Start Covered": bool(start_ok), "Launch Covered": launch_ok,
