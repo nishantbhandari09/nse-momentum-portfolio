@@ -19,6 +19,7 @@ from fyers_auth import (
 import momentum_data
 import index_history_data
 import fyers_history_data
+import nse_history_data
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
     INDEX_CATEGORIES,
@@ -1432,7 +1433,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
-nav_col1, nav_col2, nav_col3, nav_col4 = st.columns([1.2, 1.8, 1.3, 2.0])
+nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns([1.0, 1.55, 1.2, 1.45, 1.25])
 with nav_col1:
     if st.button("💻 DASHBOARD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DASHBOARD" else "secondary"):
         st.session_state.navigation_tab = "DASHBOARD"
@@ -1453,6 +1454,12 @@ with nav_col3:
 with nav_col4:
     if st.button("🧾 INDEX CONSTITUENTS", use_container_width=True, type="primary" if st.session_state.navigation_tab == "INDEX_CONSTITUENTS" else "secondary"):
         st.session_state.navigation_tab = "INDEX_CONSTITUENTS"
+        st.session_state.active_strategy_view = None
+        st.rerun()
+
+with nav_col5:
+    if st.button("📊 PRICE CHARTS", use_container_width=True, type="primary" if st.session_state.navigation_tab == "PRICE_CHARTS" else "secondary"):
+        st.session_state.navigation_tab = "PRICE_CHARTS"
         st.session_state.active_strategy_view = None
         st.rerun()
 
@@ -2278,3 +2285,172 @@ elif st.session_state.navigation_tab == "INDEX_CONSTITUENTS":
             use_container_width=True,
         )
         st.markdown(f"Source: [Official constituent CSV]({source_url})")
+
+
+# ==========================================
+# PAGE 5: HISTORICAL PRICE CHARTS & MEMBERSHIP EVENTS
+# ==========================================
+elif st.session_state.navigation_tab == "PRICE_CHARTS":
+    st.title("📊 HISTORICAL PRICE CHARTS")
+    st.caption(
+        "View saved daily prices for individual stocks and indices. FYERS history provides OHLCV; "
+        "the supplemental NSE archive adds traded value and trade counts when its parquet files are available."
+    )
+
+    fyers_symbols = fyers_history_data.load_all_symbols()
+    nse_symbols = nse_history_data.list_symbols()
+    index_symbols = list(index_history_data.TICKER_TO_INDEX_NAME.keys())
+    all_chart_symbols = list(dict.fromkeys(index_symbols + fyers_symbols + [f"{s}.NS" for s in nse_symbols]))
+    if not all_chart_symbols:
+        st.warning("No stored price history is available yet. Connect FYERS and confirm the history workflow completed.")
+    else:
+        default_symbol = "^CRSLDX" if "^CRSLDX" in all_chart_symbols else all_chart_symbols[0]
+        selected_symbol = st.selectbox(
+            "Select a stock or index",
+            options=all_chart_symbols,
+            index=all_chart_symbols.index(default_symbol),
+            format_func=lambda s: f"{index_history_data.TICKER_TO_INDEX_NAME.get(s, s.replace('.NS', ''))} ({s})"
+                if s.startswith("^") else s.replace(".NS", ""),
+            key="historical_chart_symbol",
+        )
+
+        stock_base = selected_symbol[:-3] if selected_symbol.endswith(".NS") else selected_symbol
+        nse_ohlcv = nse_history_data.load_stock_ohlcv(stock_base, adjusted=True) if not selected_symbol.startswith("^") else pd.DataFrame()
+        fyers_ohlcv = fyers_history_data.load_ohlcv(selected_symbol)
+        if not nse_ohlcv.empty:
+            chart_frame = nse_ohlcv.copy()
+            chart_source = "NSE bhavcopy archive (split/bonus-adjusted proxy; no dividend adjustment)"
+            if "Adjusted Close" in chart_frame.columns and chart_frame["Adjusted Close"].notna().any():
+                chart_frame["Chart Close"] = chart_frame["Adjusted Close"]
+            else:
+                chart_frame["Chart Close"] = chart_frame["Close"]
+        elif not fyers_ohlcv.empty:
+            chart_frame = fyers_ohlcv.copy()
+            chart_frame["Chart Close"] = chart_frame["Close"]
+            chart_source = "FYERS API saved daily OHLCV"
+        else:
+            chart_frame = pd.DataFrame()
+            chart_source = "No stored candles for this symbol"
+
+        if chart_frame.empty:
+            st.warning(
+                f"No saved candles were found for {selected_symbol}. "
+                "The chart does not substitute current prices or silently download another vendor's history."
+            )
+        else:
+            chart_frame["Date"] = pd.to_datetime(chart_frame["Date"], errors="coerce")
+            chart_frame = chart_frame.dropna(subset=["Date", "Chart Close"]).sort_values("Date")
+            min_date = chart_frame["Date"].min().date()
+            max_date = chart_frame["Date"].max().date()
+            range_cols = st.columns(2)
+            with range_cols[0]:
+                chart_start = st.date_input(
+                    "Chart start date", value=max(min_date, max_date - timedelta(days=365)),
+                    min_value=min_date, max_value=max_date, key="price_chart_start"
+                )
+            with range_cols[1]:
+                chart_end = st.date_input(
+                    "Chart end date", value=max_date,
+                    min_value=min_date, max_value=max_date, key="price_chart_end"
+                )
+            view = chart_frame.loc[
+                (chart_frame["Date"].dt.date >= chart_start)
+                & (chart_frame["Date"].dt.date <= chart_end)
+            ].copy()
+            if chart_end < chart_start:
+                st.error("Chart end date must be on or after the start date.")
+            elif view.empty:
+                st.warning("No candles exist inside this date range.")
+            else:
+                close = pd.to_numeric(view["Chart Close"], errors="coerce").dropna()
+                first_close = float(close.iloc[0]) if not close.empty else float("nan")
+                last_close = float(close.iloc[-1]) if not close.empty else float("nan")
+                total_return = (last_close / first_close - 1.0) * 100 if first_close > 0 else float("nan")
+                running_peak = close.cummax()
+                drawdown = close.div(running_peak).sub(1.0)
+                max_dd = float(drawdown.min() * 100) if not drawdown.empty else float("nan")
+                metrics = st.columns(4)
+                metrics[0].metric("Candles", f"{len(view):,}")
+                metrics[1].metric("First close", f"{first_close:,.2f}" if np.isfinite(first_close) else "—")
+                metrics[2].metric("Last close", f"{last_close:,.2f}" if np.isfinite(last_close) else "—")
+                metrics[3].metric("Price return", f"{total_return:.2f}%" if np.isfinite(total_return) else "—")
+                st.caption(f"Source: {chart_source}. Stored date range: {min_date} to {max_date}. Max drawdown in selected range: {max_dd:.2f}%.")
+                st.markdown("#### Daily closing-price chart")
+                st.line_chart(view.set_index("Date")["Chart Close"])
+                if "Volume" in view.columns and pd.to_numeric(view["Volume"], errors="coerce").notna().any():
+                    st.markdown("#### Daily traded volume")
+                    st.bar_chart(view.set_index("Date")["Volume"])
+                if "Trades" in view.columns and pd.to_numeric(view["Trades"], errors="coerce").notna().any():
+                    st.markdown("#### Daily number of trades (NSE archive)")
+                    st.bar_chart(view.set_index("Date")["Trades"])
+                if "Traded Value" in view.columns and pd.to_numeric(view["Traded Value"], errors="coerce").notna().any():
+                    st.markdown("#### Daily traded value (NSE archive)")
+                    st.line_chart(view.set_index("Date")["Traded Value"])
+                st.download_button(
+                    "📥 Download displayed OHLCV/trading data (CSV)",
+                    data=view.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"{stock_base.replace('^', '')}_history_{chart_start}_{chart_end}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+    st.markdown("---")
+    st.markdown("#### Index inclusion / exclusion history")
+    st.caption(
+        "Upload the IndexInclExcl workbook to inspect its dated membership events. "
+        "This workbook contains company names rather than a stable ticker/ISIN for every historical company, "
+        "so it must be mapped and validated before it can safely replace the backtest's point-in-time membership ledger."
+    )
+    membership_upload = st.file_uploader(
+        "Upload IndexInclExcl.xls or .xlsx",
+        type=["xls", "xlsx"],
+        key="price_chart_membership_upload",
+    )
+    if membership_upload is not None:
+        try:
+            sheets = pd.read_excel(membership_upload, sheet_name=None)
+            event_frames = []
+            for sheet_name, frame in sheets.items():
+                if frame is None or frame.empty:
+                    continue
+                lookup = {str(col).strip().lower(): col for col in frame.columns}
+                index_col = next((lookup[k] for k in lookup if k in {"index name", "index"}), None)
+                date_col = next((lookup[k] for k in lookup if k in {"event date", "date", "effective date"}), None)
+                company_col = next((lookup[k] for k in lookup if k in {"scrip name", "company name", "security name"}), None)
+                description_col = next((lookup[k] for k in lookup if k in {"description", "action"}), None)
+                if not all([date_col, company_col, description_col]):
+                    continue
+                part = pd.DataFrame({
+                    "Index": frame[index_col].fillna(sheet_name).astype(str) if index_col else sheet_name,
+                    "Event Date": pd.to_datetime(frame[date_col], errors="coerce", dayfirst=True),
+                    "Company": frame[company_col].astype(str).str.strip(),
+                    "Action": frame[description_col].astype(str).str.strip(),
+                })
+                part = part.dropna(subset=["Event Date"])
+                part["Action"] = part["Action"].str.extract(r"(Inclusion|Exclusion)", expand=False).str.upper()
+                part = part.dropna(subset=["Action"])
+                event_frames.append(part)
+            if event_frames:
+                event_data = pd.concat(event_frames, ignore_index=True).sort_values(["Index", "Event Date", "Company"])
+                index_options = sorted(event_data["Index"].dropna().astype(str).unique())
+                chosen_event_index = st.selectbox("Filter membership events by index", index_options, key="uploaded_event_index")
+                visible_events = event_data[event_data["Index"].astype(str).eq(chosen_event_index)].copy()
+                ev1, ev2, ev3 = st.columns(3)
+                ev1.metric("Events in workbook", f"{len(event_data):,}")
+                ev2.metric("Events for selected index", f"{len(visible_events):,}")
+                ev3.metric("Event date range", f"{visible_events['Event Date'].min().date()} to {visible_events['Event Date'].max().date()}" if not visible_events.empty else "—")
+                st.dataframe(visible_events, use_container_width=True, hide_index=True, height=450)
+                st.download_button(
+                    "📥 Download normalized inclusion/exclusion events",
+                    data=event_data.assign(**{"Event Date": event_data["Event Date"].dt.strftime("%Y-%m-%d")}).to_csv(index=False).encode("utf-8-sig"),
+                    file_name="index_inclusion_exclusion_events.csv",
+                    mime="text/csv",
+                )
+                st.warning(
+                    "The event file currently ends in 2020 and has company names, not guaranteed stable ticker IDs. "
+                    "The backtest will not treat this as a complete membership history until symbol/ISIN mapping and event-date coverage are verified."
+                )
+            else:
+                st.error("No recognized Index Name / Event Date / Scrip Name / Description columns were found in this workbook.")
+        except Exception as exc:
+            st.error(f"Could not read the membership workbook: {type(exc).__name__}: {exc}")
