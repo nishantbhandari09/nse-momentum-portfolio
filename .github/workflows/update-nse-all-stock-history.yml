@@ -66,8 +66,7 @@ jobs:
         with:
           name: nse-all-stock-history-${{ github.run_number }}
           path: |
-            nse_data/nse_prices.parquet
-            nse_data/nse_prices_adj.parquet
+            nse_data/yearly/*.parquet
             nse_data/download_failures.csv
           if-no-files-found: error
           retention-days: 30
