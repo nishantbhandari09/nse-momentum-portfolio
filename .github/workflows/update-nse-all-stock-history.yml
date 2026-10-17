@@ -1,0 +1,73 @@
+name: Update all-stock NSE historical archive
+
+on:
+  # Run after the NSE cash-market close on weekdays.
+  schedule:
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Earliest date to backfill (YYYY-MM-DD)"
+        required: false
+        default: "1994-11-03"
+      end_date:
+        description: "End date (YYYY-MM-DD); blank means yesterday"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nse-all-stock-history
+  cancel-in-progress: false
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Keep raw bhavcopy ZIPs and the merged parquet between runs. The cache is
+      # resumable, but GitHub cache eviction/size limits mean it is not a formal
+      # archival-storage guarantee. Artifacts are emitted for app-side use/download.
+      - name: Restore NSE history cache
+        uses: actions/cache@v4
+        with:
+          path: nse_data
+          key: nse-bhavcopy-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            nse-bhavcopy-${{ github.ref_name }}-
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip pandas pyarrow requests
+
+      - name: Download and merge NSE bhavcopy history
+        env:
+          INPUT_START_DATE: ${{ github.event.inputs.start_date }}
+          INPUT_END_DATE: ${{ github.event.inputs.end_date }}
+        run: |
+          START_DATE="${INPUT_START_DATE:-1994-11-03}"
+          if [ -n "${INPUT_END_DATE}" ]; then
+            python scripts/download_nse_history.py --start-date "$START_DATE" --end-date "$INPUT_END_DATE"
+          else
+            python scripts/download_nse_history.py --start-date "$START_DATE"
+          fi
+
+      - name: Publish downloadable history artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-all-stock-history-${{ github.run_number }}
+          path: |
+            nse_data/nse_prices.parquet
+            nse_data/nse_prices_adj.parquet
+            nse_data/download_failures.csv
+          if-no-files-found: error
+          retention-days: 30
