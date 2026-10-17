@@ -161,6 +161,12 @@ def main() -> int:
     start, end = dt.date.fromisoformat(args.start_date), dt.date.fromisoformat(args.end_date)
     if end < start:
         parser.error("--end-date must be on or after --start-date")
+    OUT.mkdir(parents=True, exist_ok=True)
+    YEARLY = OUT / "yearly"
+    YEARLY.mkdir(parents=True, exist_ok=True)
+
+    # Download only uncached weekdays. Successful ZIPs persist in the workflow
+    # cache; failed/holiday dates are retried on the next run.
     days = [
         start + dt.timedelta(days=n)
         for n in range((end - start).days + 1)
@@ -178,36 +184,63 @@ def main() -> int:
             if count % 250 == 0:
                 print(f"Fetch progress: {count:,}/{len(todo):,}; failed dates: {len(failures):,}")
 
-    frames = []
-    for day in days:
-        frame = parse(day)
-        if frame is not None and not frame.empty:
-            frames.append(frame)
-    if not frames:
-        print("No bhavcopy files were parsed. Check NSE archive access and retry; no output was overwritten.")
-        return 2
-    prices = pd.concat(frames, ignore_index=True)
-    prices = prices.drop_duplicates(["date", "isin", "symbol", "series"], keep="last")
-    OUT.mkdir(parents=True, exist_ok=True)
-    raw_path = OUT / "nse_prices.parquet"
-    if raw_path.exists():
-        try:
-            previous = pd.read_parquet(raw_path)
-            prices = pd.concat([previous, prices], ignore_index=True)
-            prices = prices.drop_duplicates(["date", "isin", "symbol", "series"], keep="last")
-        except Exception as exc:
-            print(f"Existing parquet could not be merged ({exc}); using downloaded date range only.")
-    prices = prices.sort_values(["date", "isin", "symbol"]).reset_index(drop=True)
-    prices.to_parquet(raw_path, index=False)
-    adjusted = adjust_equity_history(prices)
-    adjusted.to_parquet(OUT / "nse_prices_adj.parquet", index=False)
+    # Process one calendar year at a time to keep peak RAM bounded. Yearly
+    # partitions are independently resumable and can be fetched selectively.
+    years = sorted({day.year for day in days})
+    total_rows = 0
+    total_symbols = set()
+    for year in years:
+        year_start = max(start, dt.date(year, 1, 1))
+        year_end = min(end, dt.date(year, 12, 31))
+        year_days = [
+            year_start + dt.timedelta(days=n)
+            for n in range((year_end - year_start).days + 1)
+            if (year_start + dt.timedelta(days=n)).weekday() < 5
+        ]
+        frames = []
+        for day in year_days:
+            frame = parse(day)
+            if frame is not None and not frame.empty:
+                frames.append(frame)
+        if not frames:
+            print(f"{year}: no parsed bhavcopy rows in selected date range.")
+            continue
+        fresh = pd.concat(frames, ignore_index=True)
+        fresh = fresh.drop_duplicates(["date", "isin", "symbol", "series"], keep="last")
+
+        raw_path = YEARLY / f"nse_prices_{year}.parquet"
+        if raw_path.exists():
+            try:
+                previous = pd.read_parquet(raw_path)
+                fresh = pd.concat([previous, fresh], ignore_index=True)
+                fresh = fresh.drop_duplicates(["date", "isin", "symbol", "series"], keep="last")
+            except Exception as exc:
+                print(f"{year}: could not merge existing partition ({exc}); using rows parsed from raw cache.")
+        fresh = fresh.sort_values(["date", "isin", "symbol"]).reset_index(drop=True)
+        fresh.to_parquet(raw_path, index=False)
+
+        adjusted = adjust_equity_history(fresh)
+        adjusted.to_parquet(YEARLY / f"nse_prices_adj_{year}.parquet", index=False)
+        total_rows += len(fresh)
+        total_symbols.update(fresh["symbol"].dropna().astype(str).unique())
+        print(f"{year}: saved {len(fresh):,} rows to yearly partition.")
+
     if failures:
-        pd.DataFrame(failures).to_csv(OUT / "download_failures.csv", index=False)
+        failure_path = OUT / "download_failures.csv"
+        old_failures = pd.read_csv(failure_path) if failure_path.exists() else pd.DataFrame(columns=["date", "message"])
+        combined_failures = pd.concat([old_failures, pd.DataFrame(failures)], ignore_index=True)
+        combined_failures = combined_failures.drop_duplicates(["date", "message"], keep="last")
+        combined_failures.to_csv(failure_path, index=False)
+
+    partition_paths = sorted(YEARLY.glob("nse_prices_*.parquet"))
+    if not partition_paths:
+        print("No yearly parquet partitions were produced. Check NSE archive access and retry.")
+        return 2
     print(
-        f"Saved {len(prices):,} daily security rows; {prices['isin'].nunique():,} ISINs; "
-        f"{prices['symbol'].nunique():,} symbols; {prices['date'].min().date()} to {prices['date'].max().date()}."
+        f"Saved/updated yearly archive partitions; approximately {total_rows:,} rows in processed range, "
+        f"{len(total_symbols):,} symbols in this run. Files: {len(partition_paths)}."
     )
-    print("Note: adjusted prices are a split/bonus proxy; dividends and every corporate action are not fully adjusted.")
+    print("Adjusted prices are a split/bonus proxy; cash dividends and all corporate actions are not fully adjusted.")
     return 0
 
 
