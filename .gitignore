@@ -1,0 +1,5 @@
+# Large locally generated NSE bhavcopy cache/archive; never commit bulk market data.
+nse_data/raw/
+nse_data/yearly/
+nse_data/*.parquet
+nse_data/download_failures.csv
