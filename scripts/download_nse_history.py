@@ -219,11 +219,66 @@ def main() -> int:
         fresh = fresh.sort_values(["date", "isin", "symbol"]).reset_index(drop=True)
         fresh.to_parquet(raw_path, index=False)
 
-        adjusted = adjust_equity_history(fresh)
-        adjusted.to_parquet(YEARLY / f"nse_prices_adj_{year}.parquet", index=False)
         total_rows += len(fresh)
         total_symbols.update(fresh["symbol"].dropna().astype(str).unique())
         print(f"{year}: saved {len(fresh):,} rows to yearly partition.")
+
+    # Calculate corporate-action factors across the FULL history before writing
+    # adjusted partitions. Adjusting each year independently would miss splits
+    # and bonuses that occurred in later years.
+    raw_partitions = sorted(
+        p for p in YEARLY.glob("nse_prices_*.parquet")
+        if not p.name.startswith("nse_prices_adj_")
+    )
+    meta_frames = []
+    equity_series = {"EQ", "BE", "BZ", "BT", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA"}
+    for raw_path in raw_partitions:
+        meta = pd.read_parquet(raw_path, columns=["date", "symbol", "series", "isin", "close", "prev_close"])
+        meta = meta[meta["series"].astype(str).str.upper().isin(equity_series)]
+        meta = meta.dropna(subset=["date", "isin", "close"])
+        if not meta.empty:
+            meta_frames.append(meta)
+    if meta_frames:
+        all_meta = pd.concat(meta_frames, ignore_index=True)
+        all_meta["date"] = pd.to_datetime(all_meta["date"], errors="coerce")
+        all_meta["isin"] = all_meta["isin"].astype("string")
+        all_meta["symbol"] = all_meta["symbol"].astype("string")
+        all_meta["series"] = all_meta["series"].astype("string")
+        all_meta["close"] = pd.to_numeric(all_meta["close"], errors="coerce")
+        all_meta["prev_close"] = pd.to_numeric(all_meta["prev_close"], errors="coerce")
+        all_meta = all_meta.dropna(subset=["date", "isin", "close"])
+        all_meta = all_meta.drop_duplicates(["date", "isin", "symbol", "series"], keep="last")
+        all_meta = all_meta.sort_values(["isin", "date"]).reset_index(drop=True)
+        prior_close = all_meta.groupby("isin", sort=False)["close"].shift(1)
+        ratio = (all_meta["prev_close"] / prior_close).where(prior_close > 0)
+        all_meta["_break_factor"] = ratio.where((ratio - 1).abs() > 0.02, 1.0).fillna(1.0)
+        all_meta["adj_factor"] = all_meta.groupby("isin", sort=False)["_break_factor"].transform(
+            lambda values: values.iloc[::-1].shift(1, fill_value=1.0).cumprod().iloc[::-1]
+        )
+        factors = all_meta[["date", "isin", "symbol", "series", "adj_factor"]]
+        for raw_path in raw_partitions:
+            raw = pd.read_parquet(raw_path)
+            raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
+            equity = raw[raw["series"].astype(str).str.upper().isin(equity_series)].copy()
+            if equity.empty:
+                continue
+            equity["isin"] = equity["isin"].astype("string")
+            equity["symbol"] = equity["symbol"].astype("string")
+            equity["series"] = equity["series"].astype("string")
+            factor_part = factors[factors["date"].dt.year.eq(int(raw_path.stem.rsplit("_", 1)[-1]))]
+            equity = equity.merge(
+                factor_part,
+                on=["date", "isin", "symbol", "series"],
+                how="left",
+            )
+            equity["adj_factor"] = pd.to_numeric(equity["adj_factor"], errors="coerce").fillna(1.0)
+            for col in ("open", "high", "low", "close"):
+                equity[f"adj_{col}"] = pd.to_numeric(equity[col], errors="coerce") * equity["adj_factor"]
+            year = raw_path.stem.rsplit("_", 1)[-1]
+            equity.to_parquet(YEARLY / f"nse_prices_adj_{year}.parquet", index=False)
+        del all_meta, factors, meta_frames
+    else:
+        print("No equity rows with ISINs were available for corporate-action factor calculation.")
 
     if failures:
         failure_path = OUT / "download_failures.csv"
