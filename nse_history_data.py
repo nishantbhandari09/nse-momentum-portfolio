@@ -18,7 +18,10 @@ ADJ_PATH = NSE_DATA_DIR / "nse_prices_adj.parquet"
 def _partition_paths(adjusted: bool = False) -> list[Path]:
     if YEARLY_DIR.exists():
         prefix = "nse_prices_adj_" if adjusted else "nse_prices_"
-        paths = sorted(p for p in YEARLY_DIR.glob(f"{prefix}*.parquet") if p.is_file())
+        paths = sorted(
+            p for p in YEARLY_DIR.glob(f"{prefix}*.parquet")
+            if p.is_file() and (adjusted or not p.name.startswith("nse_prices_adj_"))
+        )
         if paths:
             return paths
     fallback = ADJ_PATH if adjusted and ADJ_PATH.exists() else RAW_PATH
