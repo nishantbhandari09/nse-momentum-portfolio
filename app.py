@@ -1559,6 +1559,24 @@ with st.expander("💾 Backups & Downloads"):
                 "connect to FYERS and configure GITHUB_ACTIONS_TOKEN in Streamlit Secrets once."
             )
 
+with st.expander("📦 NSE All-Stock Historical Archive Status", expanded=False):
+    if nse_history_data.available():
+        nse_symbols_count = len(nse_history_data.list_symbols())
+        nse_partitions = len(nse_history_data._partition_paths(False))
+        st.success(
+            f"NSE archive is available in this app environment: {nse_symbols_count:,} symbols, "
+            f"{nse_partitions} yearly partition(s). The Price Charts page can show volume, traded value "
+            "and trade counts when present."
+        )
+    else:
+        st.info(
+            "The NSE all-stock downloader and nightly workflow are configured, but their Parquet artifact "
+            "is not automatically mounted into Streamlit Cloud. Open the "
+            "[all-stock history workflow](https://github.com/nishantbhandari09/nse-momentum-portfolio/actions/workflows/update-nse-all-stock-history.yml) "
+            "and download the latest successful run's artifact. The app will only read NSE partitions "
+            "when they are present in its runtime; until then it uses the saved FYERS database."
+        )
+
 # ==========================================
 # PAGE 1: PORTFOLIO DASHBOARD & DRILL-DOWN
 # ==========================================
