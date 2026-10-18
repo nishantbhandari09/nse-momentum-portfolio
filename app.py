@@ -1146,8 +1146,42 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
         tickers + ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER, "^NSEI"]
     ))
     raw_prices = fyers_history_data.load_close_prices(audit_tickers)
+    if raw_prices is None:
+        raw_prices = pd.DataFrame()
+
+    # Include enough pre-start history for the longest momentum/MA warm-up.
+    raw_lookbacks = strat_config.get("lookbacks", [252, 120, 90, 60])
+    try:
+        if isinstance(raw_lookbacks, dict):
+            max_lookback = max(int(k) for k in raw_lookbacks)
+        else:
+            max_lookback = max(int(value) for value in raw_lookbacks)
+    except (TypeError, ValueError):
+        max_lookback = 252
+    ma_warmup = int(strat_config.get("ma_period", strat_config.get("ema_period", 200)) or 200)
+    archive_start_ts = start_ts - pd.Timedelta(
+        days=max(900, max_lookback * 2 + ma_warmup + 60)
+    )
+    # This is a supplemental source: FYERS remains primary, while the permanent
+    # NSE Release fills older/missing equity and ETF history for the requested period.
+    archive_error = None
+    try:
+        nse_prices = nse_archive_data.load_close_prices(
+            audit_tickers, archive_start_ts, end_ts
+        )
+        if nse_prices is not None and not nse_prices.empty:
+            raw_prices = nse_archive_data.merge_price_panels(raw_prices, nse_prices)
+    except Exception as exc:
+        archive_error = str(exc)
+
     if raw_prices is None or raw_prices.empty:
-        st.error("Backtest stopped: the stored FYERS history database is empty. Log into FYERS and confirm the historical update completed.")
+        message = (
+            "Backtest stopped: no saved FYERS data or downloadable NSE historical archive data is available. "
+            "Run the 'Update all-stock NSE historical archive' workflow and retry."
+        )
+        if archive_error:
+            message += f" Archive detail: {archive_error}"
+        st.error(message)
         return None, None, None
     raw_prices.index = pd.to_datetime(raw_prices.index, errors="coerce").tz_localize(None).normalize()
     raw_prices = raw_prices.loc[~raw_prices.index.isna()].sort_index()
@@ -1226,9 +1260,15 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 
     # This call reads the same stored FYERS candles but forward-fills after each
     # symbol's first real candle so daily holdings can be marked between sessions.
-    prices_df = fetch_market_data(tickers, period="5y", full_history=True)
+    prices_df = fetch_market_data(
+        tickers,
+        period="5y",
+        full_history=True,
+        start_date=archive_start_ts,
+        end_date=end_ts,
+    )
     if prices_df is None or prices_df.empty:
-        st.error("Backtest stopped: no usable FYERS prices were loaded for the selected universe.")
+        st.error("Backtest stopped: no usable FYERS/NSE historical prices were loaded for the selected universe. Check the NSE archive workflow and try again.")
         return None, None, None
     prices_df.index = pd.to_datetime(prices_df.index, errors="coerce").tz_localize(None).normalize()
     prices_df = prices_df.loc[~prices_df.index.isna()].sort_index()
