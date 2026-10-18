@@ -14,9 +14,16 @@ on:
         description: "End date (YYYY-MM-DD); blank means yesterday"
         required: false
         default: ""
+  # The first deployment of the compact builder launches the initial archive build.
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/update-nse-all-stock-history.yml"
+      - "scripts/download_nse_history.py"
+      - "scripts/build_derived.py"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: nse-all-stock-history
@@ -35,9 +42,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Keep raw bhavcopy ZIPs and the merged parquet between runs. The cache is
-      # resumable, but GitHub cache eviction/size limits mean it is not a formal
-      # archival-storage guarantee. Artifacts are emitted for app-side use/download.
+      # The raw bhavcopy cache lets subsequent runs resume; Release assets are
+      # permanent and are consumed by the Streamlit app on demand.
       - name: Restore NSE history cache
         uses: actions/cache@v4
         with:
@@ -61,12 +67,65 @@ jobs:
             python scripts/download_nse_history.py --start-date "$START_DATE"
           fi
 
-      - name: Publish downloadable history artifact
+      - name: Save previous release manifest for change detection
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/nse-previous
+          if gh release view nse-data >/dev/null 2>&1; then
+            gh release download nse-data --pattern manifest.json --dir /tmp/nse-previous --clobber || true
+          fi
+
+      - name: Build compact, adjusted per-year price files
+        run: python scripts/build_derived.py
+
+      - name: Publish changed data assets to permanent Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view nse-data >/dev/null 2>&1; then
+            gh release create nse-data --title "NSE historical data archive" --notes "Auto-updated compact daily split/bonus-adjusted price history from NSE bhavcopy archives. Adjustment does not include cash dividends."
+          fi
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          old_path = Path("/tmp/nse-previous/manifest.json")
+          new_path = Path("nse_data/derived/manifest.json")
+          old = json.loads(old_path.read_text()) if old_path.exists() else {}
+          new = json.loads(new_path.read_text())
+          old_years = old.get("years", {})
+          changed = []
+          for year, item in sorted(new.get("years", {}).items()):
+              if old_years.get(year, {}).get("sha256") != item.get("sha256"):
+                  changed.append(item["asset"])
+          if old.get("symbols_sha256") != new.get("symbols_sha256"):
+              changed.append(new.get("symbols_asset", "symbols.parquet"))
+          Path("/tmp/nse-release-assets.txt").write_text("\n".join(changed) + ("\n" if changed else ""))
+          print(f"Changed yearly/symbol assets to publish: {len(changed)}")
+          for asset in changed:
+              print(f" - {asset}")
+          PY
+
+          mapfile -t CHANGED_ASSETS < /tmp/nse-release-assets.txt
+          ASSET_PATHS=()
+          for asset in "${CHANGED_ASSETS[@]}"; do
+            [ -n "$asset" ] && ASSET_PATHS+=("nse_data/derived/$asset")
+          done
+          # The manifest is small and is refreshed every run; it advertises the
+          # available years, hashes, date coverage and last successful build.
+          ASSET_PATHS+=("nse_data/derived/manifest.json")
+          gh release upload nse-data "${ASSET_PATHS[@]}" --clobber
+
+      - name: Publish downloadable workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: nse-all-stock-history-${{ github.run_number }}
           path: |
             nse_data/yearly/*.parquet
+            nse_data/derived/*.parquet
+            nse_data/derived/manifest.json
             nse_data/download_failures.csv
           if-no-files-found: error
           retention-days: 30
