@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import requests
@@ -21,6 +22,7 @@ import index_history_data
 import fyers_history_data
 import nse_history_data
 import nse_archive_data
+import tradingview_charts as tv_charts
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
     INDEX_CATEGORIES,
@@ -2428,6 +2430,34 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             key="historical_chart_symbol",
         )
 
+        chart_interval_labels = {
+            "15 minutes": "15",
+            "1 hour": "60",
+            "Daily": "D",
+            "Weekly": "W",
+            "Monthly": "M",
+        }
+        selected_interval = st.selectbox(
+            "TradingView interval",
+            options=list(chart_interval_labels),
+            index=2,
+            key="tradingview_chart_interval",
+        )
+        st.markdown("#### TradingView price chart")
+        components.html(
+            tv_charts.advanced_chart_html(
+                tv_charts.tv_symbol(selected_symbol),
+                interval=chart_interval_labels[selected_interval],
+                height=560,
+            ),
+            height=590,
+            scrolling=False,
+        )
+        st.caption(
+            "TradingView is for chart display only. Live scan quotes come from FYERS; "
+            "stored FYERS/NSE data remains the source for scanning calculations, historical metrics, and backtests."
+        )
+
         stock_base = selected_symbol[:-3] if selected_symbol.endswith(".NS") else selected_symbol
         nse_ohlcv = nse_history_data.load_stock_ohlcv(stock_base, adjusted=True) if not selected_symbol.startswith("^") else pd.DataFrame()
         fyers_ohlcv = fyers_history_data.load_ohlcv(selected_symbol)
@@ -2448,8 +2478,8 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
 
         if chart_frame.empty:
             st.warning(
-                f"No saved candles were found for {selected_symbol}. "
-                "The chart does not substitute current prices or silently download another vendor's history."
+                f"No stored FYERS/NSE candles were found for {selected_symbol}. "
+                "The TradingView chart above is independent; stored-data metrics and CSV export require local historical candles."
             )
         else:
             chart_frame["Date"] = pd.to_datetime(chart_frame["Date"], errors="coerce")
@@ -2459,12 +2489,12 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             range_cols = st.columns(2)
             with range_cols[0]:
                 chart_start = st.date_input(
-                    "Chart start date", value=max(min_date, max_date - timedelta(days=365)),
+                    "Stored-data start date", value=max(min_date, max_date - timedelta(days=365)),
                     min_value=min_date, max_value=max_date, key="price_chart_start"
                 )
             with range_cols[1]:
                 chart_end = st.date_input(
-                    "Chart end date", value=max_date,
+                    "Stored-data end date", value=max_date,
                     min_value=min_date, max_value=max_date, key="price_chart_end"
                 )
             view = chart_frame.loc[
@@ -2488,11 +2518,13 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
                 metrics[1].metric("First close", f"{first_close:,.2f}" if np.isfinite(first_close) else "—")
                 metrics[2].metric("Last close", f"{last_close:,.2f}" if np.isfinite(last_close) else "—")
                 metrics[3].metric("Price return", f"{total_return:.2f}%" if np.isfinite(total_return) else "—")
-                st.caption(f"Source: {chart_source}. Stored date range: {min_date} to {max_date}. Max drawdown in selected range: {max_dd:.2f}%.")
-                st.markdown("#### Daily closing-price chart")
-                st.line_chart(view.set_index("Date")["Chart Close"])
+                st.caption(
+                    f"Metrics source: {chart_source}. Stored date range: {min_date} to {max_date}. "
+                    f"Max drawdown in selected range: {max_dd:.2f}%. "
+                    "These metrics and exported rows are calculated from stored data, not from the TradingView widget."
+                )
                 if "Volume" in view.columns and pd.to_numeric(view["Volume"], errors="coerce").notna().any():
-                    st.markdown("#### Daily traded volume")
+                    st.markdown("#### Stored historical volume (FYERS/NSE archive)")
                     st.bar_chart(view.set_index("Date")["Volume"])
                 if "Trades" in view.columns and pd.to_numeric(view["Trades"], errors="coerce").notna().any():
                     st.markdown("#### Daily number of trades (NSE archive)")
