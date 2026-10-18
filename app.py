@@ -20,6 +20,7 @@ import momentum_data
 import index_history_data
 import fyers_history_data
 import nse_history_data
+import nse_archive_data
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
     INDEX_CATEGORIES,
@@ -158,13 +159,13 @@ def get_selected_etf_tickers(groups):
     return tickers
 
 
-@st.cache_data(ttl=3600)
-def fetch_market_data(tickers, period="5y", full_history=False):
-    """Load price history exclusively from the persisted FYERS OHLCV archive.
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_market_data(tickers, period="5y", full_history=False, start_date=None, end_date=None):
+    """Load saved FYERS prices first and use the permanent NSE archive to fill gaps.
 
-    The period arguments remain for compatibility with existing scanner and
-    backtest callers. The archive contains the full history available from FYERS;
-    no Yahoo/NSE price fallback is used, and no future values are backfilled.
+    The NSE archive is downloaded lazily by requested calendar year. In overlapping
+    dates, FYERS values remain primary; split/bonus-adjusted NSE values fill older
+    or missing rows. No future-price backfill is used.
     """
     ticker_values = list(tickers) if tickers is not None else []
     requested = list(dict.fromkeys(
@@ -173,6 +174,28 @@ def fetch_market_data(tickers, period="5y", full_history=False):
         + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
     ))
     prices = fyers_history_data.load_close_prices(requested)
+
+    # Archive downloads are intentionally limited to explicit historical/backtest
+    # requests so short live quote/scan calls do not download old-year files.
+    if full_history or start_date is not None or end_date is not None:
+        if start_date is not None:
+            archive_start = pd.Timestamp(start_date).normalize()
+        elif prices is not None and not prices.empty:
+            archive_start = pd.Timestamp(prices.index.min()).normalize()
+        else:
+            archive_start = pd.Timestamp("1994-11-03")
+        archive_end = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp.today().normalize()
+        try:
+            archive_prices = nse_archive_data.load_close_prices(requested, archive_start, archive_end)
+            if archive_prices is not None and not archive_prices.empty:
+                prices = nse_archive_data.merge_price_panels(prices, archive_prices)
+        except Exception as exc:
+            # Preserve the FYERS-only route if the initial archive Release has not
+            # finished building yet. The backtest coverage audit will still fail
+            # safely if FYERS cannot cover the requested dates.
+            if prices is None or prices.empty:
+                st.warning(f"NSE historical archive could not be loaded: {exc}")
+
     if prices is None or prices.empty:
         return pd.DataFrame()
     prices = prices.loc[:, ~prices.isna().all(axis=0)].sort_index()
