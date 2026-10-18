@@ -77,13 +77,13 @@ class NSEArchivePanelTests(unittest.TestCase):
             def fake_asset(filename, expected_sha256=None):
                 return symbols_path if filename == "symbols.parquet" else year_path
 
-            with patch.object(nse_archive_data, "get_manifest", return_value=manifest), \\
-                 patch.object(nse_archive_data, "ensure_asset", side_effect=fake_asset):
-                prices = nse_archive_data.load_close_prices(
-                    ["RELIANCE.NS", "OLDRELIANCE.NS", "TCS.NS", "^NSEI"],
-                    "2020-01-01",
-                    "2020-01-02",
-                )
+            with patch.object(nse_archive_data, "get_manifest", return_value=manifest):
+                with patch.object(nse_archive_data, "ensure_asset", side_effect=fake_asset):
+                    prices = nse_archive_data.load_close_prices(
+                        ["RELIANCE.NS", "OLDRELIANCE.NS", "TCS.NS", "^NSEI"],
+                        "2020-01-01",
+                        "2020-01-02",
+                    )
 
             self.assertAlmostEqual(prices.loc[pd.Timestamp("2020-01-01"), "RELIANCE.NS"], 100.0)
             self.assertAlmostEqual(prices.loc[pd.Timestamp("2020-01-02"), "OLDRELIANCE.NS"], 102.0)
