@@ -261,7 +261,8 @@ def merge_price_panels(primary: pd.DataFrame | None, fallback: pd.DataFrame | No
             primary_series = pd.to_numeric(p[column].reindex(all_dates), errors="coerce")
             overlap = primary_series.notna() & fallback_series.notna() & fallback_series.ne(0)
             if overlap.any():
-                ratio = (primary_series[overlap] / fallback_series[overlap]).replace([float("inf"), -float("inf")], pd.NA).dropna()
+                ratio = (primary_series[overlap] / fallback_series[overlap]).dropna()
+                ratio = ratio[(ratio > 0) & (ratio < float("inf"))]
                 if not ratio.empty:
                     ratio = ratio.tail(120)
                     factor = float(ratio.median())
