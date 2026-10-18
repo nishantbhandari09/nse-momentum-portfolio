@@ -1623,21 +1623,54 @@ with st.expander("💾 Backups & Downloads"):
             )
 
 with st.expander("📦 NSE All-Stock Historical Archive Status", expanded=False):
+    st.markdown("**Published historical archive used by backtests**")
+    nse_release_status = nse_archive_data.get_archive_status()
+    if nse_release_status.get("available"):
+        release_cols = st.columns(4)
+        release_cols[0].metric("Years Published", f'{nse_release_status["years_published"]:,}')
+        release_cols[1].metric("Years Cached Here", f'{nse_release_status["years_downloaded_locally"]:,}')
+        release_cols[2].metric("Symbols", f'{nse_release_status["total_symbols"] or 0:,}')
+        release_cols[3].metric("Historical Rows", f'{nse_release_status["total_rows"] or 0:,}')
+        st.success(
+            f'Permanent GitHub Release "{nse_release_status["release_tag"]}" is available: '
+            f'{nse_release_status["first_date"] or "unknown"} to {nse_release_status["latest_date"] or "unknown"}.'
+        )
+        st.caption(
+            f'Last archive build: {nse_release_status["generated_at"] or "unknown"}. '
+            "The app downloads only the calendar years needed by a backtest and reuses verified local files. "
+            "FYERS prices take precedence wherever both sources have data."
+        )
+    else:
+        st.warning(
+            "The permanent NSE data Release is not available yet, so the app cannot download its historical "
+            "archive. Run the all-stock historical workflow and wait for a successful green check."
+        )
+        if nse_release_status.get("error"):
+            st.caption(f'Data status detail: {nse_release_status["error"]}')
+    status_col1, status_col2 = st.columns(2)
+    if status_col1.button("🔄 Refresh archive status", key="refresh_nse_release_status", use_container_width=True):
+        nse_release_status = nse_archive_data.get_archive_status(refresh=True)
+        st.rerun()
+    status_col2.link_button(
+        "Open history workflow",
+        "https://github.com/nishantbhandari09/nse-momentum-portfolio/actions/workflows/update-nse-all-stock-history.yml",
+        use_container_width=True,
+    )
+
+    st.divider()
+    st.markdown("**Local full-OHLCV archive for volume/traded-value charts**")
     if nse_history_data.available():
         nse_symbols_count = len(nse_history_data.list_symbols())
         nse_partitions = len(nse_history_data._partition_paths(False))
         st.success(
-            f"NSE archive is available in this app environment: {nse_symbols_count:,} symbols, "
-            f"{nse_partitions} yearly partition(s). The Price Charts page can show volume, traded value "
-            "and trade counts when present."
+            f"Local NSE raw archive is available: {nse_symbols_count:,} symbols, "
+            f"{nse_partitions} yearly partition(s)."
         )
     else:
         st.info(
-            "The NSE all-stock downloader and nightly workflow are configured, but their Parquet artifact "
-            "is not automatically mounted into Streamlit Cloud. Open the "
-            "[all-stock history workflow](https://github.com/nishantbhandari09/nse-momentum-portfolio/actions/workflows/update-nse-all-stock-history.yml) "
-            "and download the latest successful run's artifact. The app will only read NSE partitions "
-            "when they are present in its runtime; until then it uses the saved FYERS database."
+            "The full-OHLCV yearly partitions are separate from the compact backtest archive. "
+            "They may not be mounted into Streamlit Cloud; the backtest uses the permanent Release assets "
+            "above, while volume/traded-value charts need the raw partitions locally."
         )
 
 # ==========================================
