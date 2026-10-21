@@ -177,26 +177,50 @@ def fetch_market_data(tickers, period="5y", full_history=False, start_date=None,
     ))
     prices = fyers_history_data.load_close_prices(requested)
 
-    # Archive downloads are intentionally limited to explicit historical/backtest
-    # requests so short live quote/scan calls do not download old-year files.
-    if full_history or start_date is not None or end_date is not None:
-        if start_date is not None:
-            archive_start = pd.Timestamp(start_date).normalize()
-        elif prices is not None and not prices.empty:
-            archive_start = pd.Timestamp(prices.index.min()).normalize()
-        else:
-            archive_start = pd.Timestamp("1994-11-03")
-        archive_end = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp.today().normalize()
+    # Always use the permanent NSE archive as a secondary source, not only for
+    # explicit backtests. This lets scans, regime filters and portfolio valuation
+    # recover older/missing equity and ETF candles too. Index tickers (^) are
+    # intentionally excluded by nse_archive_data because they need their own source.
+    archive_end = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp.today().normalize()
+    if start_date is not None:
+        archive_start = pd.Timestamp(start_date).normalize()
+    elif full_history:
+        archive_start = (
+            pd.Timestamp(prices.index.min()).normalize()
+            if prices is not None and not prices.empty
+            else pd.Timestamp("1994-11-03")
+        )
+    else:
+        # Match the requested period for normal scans/portfolio views so we do
+        # not download decades of stock history for a one-month holdings screen.
+        requested_period = str(period or "5y").strip().lower()
         try:
-            archive_prices = nse_archive_data.load_close_prices(requested, archive_start, archive_end)
-            if archive_prices is not None and not archive_prices.empty:
-                prices = nse_archive_data.merge_price_panels(prices, archive_prices)
-        except Exception as exc:
-            # Preserve the FYERS-only route if the initial archive Release has not
-            # finished building yet. The backtest coverage audit will still fail
-            # safely if FYERS cannot cover the requested dates.
-            if prices is None or prices.empty:
-                st.warning(f"NSE historical archive could not be loaded: {exc}")
+            if requested_period == "max":
+                archive_start = pd.Timestamp("1994-11-03")
+            elif requested_period.endswith("mo"):
+                archive_start = archive_end - pd.DateOffset(months=max(1, int(requested_period[:-2])))
+            elif requested_period.endswith("y"):
+                archive_start = archive_end - pd.DateOffset(years=max(1, int(requested_period[:-1])))
+            elif requested_period.endswith("d"):
+                archive_start = archive_end - pd.Timedelta(days=max(1, int(requested_period[:-1])))
+            elif requested_period.endswith("m"):
+                archive_start = archive_end - pd.DateOffset(months=max(1, int(requested_period[:-1])))
+            else:
+                archive_start = archive_end - pd.DateOffset(years=5)
+        except (TypeError, ValueError):
+            archive_start = archive_end - pd.DateOffset(years=5)
+    try:
+        archive_prices = nse_archive_data.load_close_prices(requested, archive_start, archive_end)
+        if archive_prices is not None and not archive_prices.empty:
+            # FYERS candles win on matching dates; NSE-adjusted prices fill dates
+            # or whole symbols that FYERS did not return. The merged archive files
+            # are cached on disk under nse_data/derived for subsequent app runs.
+            prices = nse_archive_data.merge_price_panels(prices, archive_prices)
+    except Exception as exc:
+        # Keep the available source usable, but expose archive failures instead of
+        # implying that all historical gaps have been repaired.
+        if prices is None or prices.empty or full_history or start_date is not None:
+            st.warning(f"NSE historical archive could not be loaded; some price gaps may remain: {exc}")
 
     if prices is None or prices.empty:
         return pd.DataFrame()
