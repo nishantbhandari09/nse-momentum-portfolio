@@ -925,3 +925,16 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
 
 # app (1).py mirrors the same logic as app.py for the duplicate deployment copy.
+
+## Data health, trading costs and EOD alerts
+
+The **Data & EOD** page adds a structural audit of saved FYERS stock/ETF candles, the index-inception coverage audit, and a status view of the NSE historical archive. Structural checks flag duplicate dates, invalid OHLC rows, stale files, gaps longer than seven calendar days, and close moves over 25%; flags require review and do not themselves establish that a price is wrong.
+
+Backtests now deduct estimated fees plus slippage on actual executed buy/sell turnover. The defaults are editable assumptions (buy-side fees 15 bps, sell-side fees 25 bps, slippage 5 bps per side); adjust them to match your broker contract notes and execution conditions. Cash-limited unleveraged strategies cannot spend more than available cash on purchases.
+
+The **End-of-Day Report & Alerts** tab can generate a strategy-specific report from stored closes, show selected candidates and return lookbacks, download TXT/CSV output, and send it to configured Telegram and/or SMTP email channels. Add the following optional entries in Streamlit Secrets:
+
+- Telegram: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- Email: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `ALERT_EMAIL_TO`
+
+Reports are generated and sent on demand. This version does not send unattended personalized reports because strategy profiles currently live in Streamlit session state rather than a durable strategy store; a scheduler should not guess which strategy to send.
