@@ -3125,7 +3125,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 key="eod_report_strategy",
             )
             report_strategy = st.session_state.strategies[report_strategy_name]
-            report_email_key = f"eod_report_recipient_{report_strategy_name}"
+            report_email_key = f"strategy_notification_email_{report_strategy_name}"
             default_report_email = str(
                 report_strategy.get("notification_email", "") or _email_secret("ALERT_EMAIL_TO")
             ).strip()
@@ -3249,7 +3249,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                             "DATA / EXECUTION NOTES",
                             "Signals use stored daily closes and your saved rules. A signal is not an order or a guarantee of execution.",
                             "Confirm data health, liquidity, spreads, corporate actions and position sizing before acting.",
-                            "EOD alert delivery occurs only when you press Send; this page does not run a background scheduler.",
+                            "This manually generated EOD report is sent only when you press Send. Rebalance-date emails are checked separately when the app runs after 4 p.m. IST on a weekday.",
                         ])
                         report_text = "\n".join(report_lines)
                         st.session_state["_eod_report_text"] = report_text
@@ -3299,7 +3299,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 smtp_username = _secret_value("SMTP_USERNAME")
                 smtp_password = _secret_value("SMTP_PASSWORD")
                 smtp_from = _secret_value("SMTP_FROM", smtp_username)
-                smtp_to = report_recipient_email.strip() or _secret_value("ALERT_EMAIL_TO")
+                smtp_to = report_recipient_email.strip()
                 try:
                     smtp_port = int(_secret_value("SMTP_PORT", "587"))
                 except ValueError:
@@ -3344,7 +3344,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
 
     st.markdown("---")
     st.caption(
-        "The current app keeps strategy configuration in Streamlit session state. Personalized unattended alerts "
-        "require a durable saved-strategy store and scheduler; the integrated workflow here generates and sends "
-        "the report on demand, so it cannot silently send a stale or different strategy in the background."
+        "Strategy emails send when you run a scan, execute a rebalance, or the app checks a due rebalance cycle after 4 p.m. IST on a weekday. "
+        "Streamlit does not run this check while idle or closed, and strategy settings are session-scoped; guaranteed unattended delivery "
+        "requires a durable private strategy store and an external scheduler."
     )
