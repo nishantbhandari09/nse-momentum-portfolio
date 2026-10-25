@@ -22,6 +22,9 @@ import index_history_data
 import fyers_history_data
 import nse_history_data
 import nse_archive_data
+import data_health
+import trading_costs
+import eod_reporting
 import tradingview_charts as tv_charts
 from etf_index_universe import fetch_etf_and_index_universe
 from index_constituents import (
@@ -969,7 +972,8 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     return retained + new_entries
 
 
-def run_backtest_simulation(strat_config, initial_capital, start_date, end_date, use_point_in_time=True):
+def run_backtest_simulation(strat_config, initial_capital, start_date, end_date, use_point_in_time=True, trading_cost_config=None):
+    cost_config = trading_costs.normalize_cost_config(trading_cost_config)
     selected_groups = strat_config.get("groups", ["Nifty 500"])
     apply_point_in_time = use_point_in_time and any(
         group in selected_groups for group in ("Nifty 500", "Nifty 200")
@@ -1409,9 +1413,35 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
     current_holdings = {}
     multiplier = float(strat_config.get("allocation_multiplier", 1.0))
     all_dates = prices_df.index
+    cumulative_trading_costs = 0.0
+    daily_transaction_cost = 0.0
+    daily_buy_turnover = 0.0
+    daily_sell_turnover = 0.0
+    daily_trade_count = 0
+
+    def execute_target_holdings(target_holdings):
+        nonlocal current_cash, current_holdings, cumulative_trading_costs
+        nonlocal daily_transaction_cost, daily_buy_turnover, daily_sell_turnover, daily_trade_count
+        current_holdings, current_cash, trade_stats = trading_costs.rebalance_holdings(
+            current_holdings=current_holdings,
+            target_holdings=target_holdings,
+            close_row=close_row,
+            current_cash=current_cash,
+            config=cost_config,
+            allow_leverage=multiplier > 1.0,
+        )
+        daily_transaction_cost += trade_stats["Trading Costs"]
+        daily_buy_turnover += trade_stats["Buy Turnover"]
+        daily_sell_turnover += trade_stats["Sell Turnover"]
+        daily_trade_count += trade_stats["Trade Count"]
+        cumulative_trading_costs += trade_stats["Trading Costs"]
 
     for dt in simulation_dates:
         close_row = prices_df.loc[dt]
+        daily_transaction_cost = 0.0
+        daily_buy_turnover = 0.0
+        daily_sell_turnover = 0.0
+        daily_trade_count = 0
 
         # Never value an open holding indefinitely at its last known close.
         # If more than five rows have passed without another candle, there is
@@ -1464,9 +1494,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                 holdings_history.append((dt, list(selected_stocks)))
 
                 if selected_stocks:
-                    # Never buy a symbol without a real FYERS close on the
-                    # execution date. If the target universe is temporarily
-                    # unpriceable, keep the existing portfolio instead.
+                    # Keep only candidates with a real saved execution close.
                     tradable = [
                         sym for sym in selected_stocks
                         if sym in raw_prices.columns
@@ -1475,31 +1503,34 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
                         and float(raw_prices.at[dt, sym]) > 0
                     ]
                     if tradable:
-                        current_cash = daily_value
-                        current_holdings = {}
-                        effective_pool = daily_value * multiplier
+                        # Reserve an estimated cost buffer for unleveraged portfolios.
+                        effective_pool = max(float(daily_value), 0.0) * multiplier
+                        if multiplier <= 1.0:
+                            effective_pool /= (
+                                1.0
+                                + trading_costs.effective_cost_rate("buy", cost_config)
+                                + trading_costs.effective_cost_rate("sell", cost_config)
+                            )
                         allocation_per_stock = effective_pool / len(tradable)
+                        target_holdings = {}
                         for sym in tradable:
                             price = float(close_row[sym])
-                            qty = int(allocation_per_stock // price)
+                            qty = int(allocation_per_stock // price) if price > 0 else 0
                             if qty > 0:
-                                current_holdings[sym] = qty
-                                current_cash -= qty * price
+                                target_holdings[sym] = qty
+                        execute_target_holdings(target_holdings)
                 elif (
                     strat_config.get("use_market_trend_filter", False)
                     and not _market_trend_is_bullish(strat_config, as_of_date=signal_dt)
                 ):
                     # Honour the user setting: hold during bearish periods when
-                    # exit-on-bearish is disabled; otherwise move to cash.
+                    # exit-on-bearish is disabled; otherwise sell at the next rebalance.
                     if strat_config.get("market_trend_exit_on_bearish", True):
-                        current_holdings = {}
-                        current_cash = daily_value
+                        execute_target_holdings({})
                 else:
-                    # An empty target during a non-bearish rebalance means none
-                    # of the assets passed the configured rules. Do not silently
-                    # keep old holdings that no longer qualify.
-                    current_holdings = {}
-                    current_cash = daily_value
+                    # An empty target during a non-bearish rebalance exits holdings
+                    # which no longer qualify; the sell-side costs are deducted.
+                    execute_target_holdings({})
 
         # Re-value at today's close after any rebalance. Record every trading day,
         # not only rebalance dates, so maximum drawdown and daily risk metrics
@@ -1509,7 +1540,15 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
             price = close_row.get(sym, np.nan)
             if pd.notna(price) and float(price) > 0:
                 marked_value += int(qty) * float(price)
-        portfolio_history.append({"Date": dt, "Portfolio Value": marked_value})
+        portfolio_history.append({
+            "Date": dt,
+            "Portfolio Value": marked_value,
+            "Trading Costs": float(daily_transaction_cost),
+            "Cumulative Trading Costs": float(cumulative_trading_costs),
+            "Buy Turnover": float(daily_buy_turnover),
+            "Sell Turnover": float(daily_sell_turnover),
+            "Trade Count": int(daily_trade_count),
+        })
 
     if not portfolio_history:
         return None, None, None
@@ -1522,7 +1561,7 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
-nav_col1, nav_col2, nav_col3, nav_col4, nav_col5 = st.columns([1.0, 1.55, 1.2, 1.45, 1.25])
+nav_col1, nav_col2, nav_col3, nav_col4, nav_col5, nav_col6 = st.columns([1.0, 1.45, 1.15, 1.25, 1.1, 1.25])
 with nav_col1:
     if st.button("💻 DASHBOARD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DASHBOARD" else "secondary"):
         st.session_state.navigation_tab = "DASHBOARD"
@@ -1549,6 +1588,12 @@ with nav_col4:
 with nav_col5:
     if st.button("📊 PRICE CHARTS", use_container_width=True, type="primary" if st.session_state.navigation_tab == "PRICE_CHARTS" else "secondary"):
         st.session_state.navigation_tab = "PRICE_CHARTS"
+        st.session_state.active_strategy_view = None
+        st.rerun()
+
+with nav_col6:
+    if st.button("🛡️ DATA & EOD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DATA_REPORTS" else "secondary"):
+        st.session_state.navigation_tab = "DATA_REPORTS"
         st.session_state.active_strategy_view = None
         st.rerun()
 
@@ -2249,6 +2294,36 @@ elif st.session_state.navigation_tab == "BACKTEST":
     with bt_c3:
         end_d = st.date_input("End Date :", value=datetime.now())
 
+    with st.expander("💸 Trading-cost assumptions (deducted from backtest cash)", expanded=True):
+        cost_col1, cost_col2, cost_col3 = st.columns(3)
+        with cost_col1:
+            buy_fee_bps = st.number_input(
+                "Estimated buy-side fees (bps)", min_value=0.0, max_value=1000.0,
+                value=15.0, step=1.0,
+                help="Brokerage and applicable exchange/statutory costs, excluding slippage. 15 bps = 0.15% of buy turnover.",
+            )
+        with cost_col2:
+            sell_fee_bps = st.number_input(
+                "Estimated sell-side fees (bps)", min_value=0.0, max_value=1000.0,
+                value=25.0, step=1.0,
+                help="Estimated sell-side fees and taxes, excluding slippage. Check your broker's current contract note and adjust.",
+            )
+        with cost_col3:
+            slippage_bps = st.number_input(
+                "Slippage per side (bps)", min_value=0.0, max_value=1000.0,
+                value=5.0, step=1.0,
+                help="Estimated execution shortfall on each buy or sell, applied to the traded notional.",
+            )
+        trading_cost_config = {
+            "buy_fee_bps": float(buy_fee_bps),
+            "sell_fee_bps": float(sell_fee_bps),
+            "slippage_bps": float(slippage_bps),
+        }
+        st.caption(
+            "These are editable estimates, not live FYERS fee quotes. The model deducts fees plus slippage "
+            "on actual share turnover, sells first, and reduces unleveraged buys when cash is insufficient."
+        )
+
     use_pit = st.checkbox(
         "Use point-in-time index membership for backtesting",
         value=True,
@@ -2273,7 +2348,7 @@ elif st.session_state.navigation_tab == "BACKTEST":
         with st.spinner("Running historical rebalance simulation against market data..."):
             bt_results, holdings_history, bt_prices_df = run_backtest_simulation(
                 bt_strat_config, initial_cap, start_d.strftime("%Y-%m-%d"), end_d.strftime("%Y-%m-%d"),
-                use_point_in_time=use_pit,
+                use_point_in_time=use_pit, trading_cost_config=trading_cost_config,
             )
 
             if bt_results is not None and not bt_results.empty:
@@ -2312,10 +2387,20 @@ elif st.session_state.navigation_tab == "BACKTEST":
                 res_m5.metric("Annualized Volatility", f"{annual_vol_pct:.2f}%")
                 res_m6.metric("Daily Sharpe Ratio (RF = 0)", f"{sharpe_daily:.2f}")
 
+                cost_total = float(bt_results.get("Trading Costs", pd.Series(dtype=float)).sum())
+                buy_turnover_total = float(bt_results.get("Buy Turnover", pd.Series(dtype=float)).sum())
+                sell_turnover_total = float(bt_results.get("Sell Turnover", pd.Series(dtype=float)).sum())
+                trade_count_total = int(bt_results.get("Trade Count", pd.Series(dtype=int)).sum())
+                cost_m1, cost_m2, cost_m3, cost_m4 = st.columns(4)
+                cost_m1.metric("Estimated Trading Costs Paid", f"₹{cost_total:,.2f}")
+                cost_m2.metric("Buy Turnover", f"₹{buy_turnover_total:,.2f}")
+                cost_m3.metric("Sell Turnover", f"₹{sell_turnover_total:,.2f}")
+                cost_m4.metric("Executed Orders", f"{trade_count_total:,}")
                 st.caption(
-                    "Equity is marked to market every trading day. Signals use data through the previous "
-                    "session and are applied at the next session's close. Sharpe assumes a zero risk-free "
-                    "rate; trading costs, taxes, slippage and dividend cash flows are not included."
+                    "The equity curve is net of the configured estimated fees and slippage. Fees are charged "
+                    "on actual buy/sell turnover; unleveraged purchases are cash-limited. Dividend cash flows "
+                    "and corporate-action entitlements remain separate data limitations. Sharpe assumes a zero "
+                    "risk-free rate. Review these assumptions against your broker contract notes."
                 )
                 st.markdown("#### Daily Portfolio Value Equity Curve")
                 st.line_chart(bt_results["Portfolio Value"])
@@ -2624,3 +2709,325 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
                 st.error("No recognized Index Name / Event Date / Scrip Name / Description columns were found in this workbook.")
         except Exception as exc:
             st.error(f"Could not read the membership workbook: {type(exc).__name__}: {exc}")
+
+
+
+# ==========================================
+# PAGE 6: DATA HEALTH, END-OF-DAY REPORT & ALERTS
+# ==========================================
+elif st.session_state.navigation_tab == "DATA_REPORTS":
+    st.title("🛡️ DATA HEALTH & END-OF-DAY REPORT")
+    st.caption(
+        "Validate the stored historical dataset, generate a rules-based after-close report for a chosen strategy, "
+        "and optionally deliver it through Telegram or email. This page never places orders."
+    )
+    health_tab, eod_tab = st.tabs(["Historical Data Health", "End-of-Day Report & Alerts"])
+
+    with health_tab:
+        history_summary = fyers_history_data.get_data_summary()
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("Symbols with FYERS History", f'{history_summary.get("symbols", 0):,}')
+        summary_cols[1].metric("Stored Daily Candles", f'{history_summary.get("rows", 0):,}')
+        summary_cols[2].metric("Oldest Stored Date", history_summary.get("oldest_date") or "—")
+        summary_cols[3].metric("Latest FYERS Date", history_summary.get("latest_date") or "—")
+
+        st.markdown("#### Stock / ETF OHLC Audit")
+        st.caption(
+            "Checks the raw saved FYERS CSVs for source markers, duplicate dates, invalid OHLC values, "
+            "stale files, long date gaps and unusually large close moves. Large moves and gaps are review flags, "
+            "not automatic proof of bad data."
+        )
+        if st.button("🔍 Run full stock / ETF data audit", type="primary", key="run_stock_data_audit"):
+            with st.spinner("Auditing saved FYERS stock and ETF history..."):
+                audited = data_health.audit_fyers_price_files(max_stale_days=7)
+                st.session_state["_stock_data_audit"] = audited
+                st.session_state["_stock_data_audit_at"] = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%Y-%m-%d %H:%M IST")
+
+        audit_frame = st.session_state.get("_stock_data_audit")
+        if isinstance(audit_frame, pd.DataFrame):
+            audit_summary = data_health.summarize_audit(audit_frame)
+            audit_cols = st.columns(4)
+            audit_cols[0].metric("Symbols Audited", f'{audit_summary["symbols"]:,}')
+            audit_cols[1].metric("Passed Structural Checks", f'{audit_summary["healthy"]:,}')
+            audit_cols[2].metric("Symbols Needing Review", f'{audit_summary["issues"]:,}')
+            audit_cols[3].metric("Stale Files", f'{audit_summary["stale"]:,}')
+            st.caption(
+                f'Last full audit: {st.session_state.get("_stock_data_audit_at", "—")}. '
+                "A structurally clean file has not necessarily been validated value-by-value against an official exchange source."
+            )
+            status_filter = st.multiselect(
+                "Show health statuses",
+                options=sorted(audit_frame["Health Status"].dropna().astype(str).unique()),
+                default=sorted(audit_frame["Health Status"].dropna().astype(str).unique()),
+                key="stock_audit_status_filter",
+            )
+            visible_audit = audit_frame[audit_frame["Health Status"].astype(str).isin(status_filter)]
+            st.dataframe(visible_audit, use_container_width=True, hide_index=True, height=450)
+            st.download_button(
+                "📥 Download stock / ETF audit (CSV)",
+                data=audit_frame.to_csv(index=False).encode("utf-8-sig"),
+                file_name="fyers_stock_etf_data_health.csv",
+                mime="text/csv",
+                key="download_stock_audit",
+            )
+        else:
+            st.info("Run the audit to inspect individual symbols. It reads stored files only and does not download new history.")
+
+        st.markdown("#### Index Inception / Coverage Audit")
+        try:
+            index_coverage = index_history_data.get_index_history_coverage()
+            if index_coverage is not None and not index_coverage.empty:
+                st.dataframe(index_coverage, use_container_width=True, hide_index=True, height=330)
+                st.caption(
+                    "Coverage status checks date ranges and structural gaps. It does not certify that every saved "
+                    "index close matches the exchange's official historical value."
+                )
+                st.download_button(
+                    "📥 Download index coverage audit (CSV)",
+                    data=index_coverage.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="index_history_coverage_audit.csv",
+                    mime="text/csv",
+                    key="download_index_audit",
+                )
+            else:
+                st.warning("No index-coverage audit rows are available.")
+        except Exception as exc:
+            st.warning(f"Index audit could not be read: {type(exc).__name__}: {exc}")
+
+        st.markdown("#### NSE Historical Archive")
+        refresh_archive = st.button("🔄 Refresh NSE archive status", key="refresh_nse_archive_status")
+        archive_status = nse_archive_data.get_archive_status(refresh=refresh_archive)
+        if archive_status.get("available"):
+            archive_cols = st.columns(4)
+            archive_cols[0].metric("Published Archive Years", f'{archive_status.get("years_published", 0):,}')
+            archive_cols[1].metric("Downloaded Locally", f'{archive_status.get("years_downloaded_locally", 0):,}')
+            archive_cols[2].metric("Archive First Date", archive_status.get("first_date") or "—")
+            archive_cols[3].metric("Archive Latest Date", archive_status.get("latest_date") or "—")
+            st.caption(
+                f'Archive manifest generated: {archive_status.get("generated_at") or "unknown"}. '
+                f'Symbol count: {archive_status.get("total_symbols") or "unknown"}. '
+                "NSE archive prices are adjusted-price proxies and may not include cash dividends."
+            )
+        else:
+            st.warning(
+                "NSE archive manifest is unavailable. Existing stored candles may still be usable, but missing "
+                f"historical periods cannot be assumed repaired. Detail: {archive_status.get('error') or 'not reported'}"
+            )
+
+    with eod_tab:
+        st.markdown("#### Generate report for a saved strategy")
+        strategy_names = list(st.session_state.get("strategies", {}).keys())
+        if not strategy_names:
+            st.warning("No strategy is available in this Streamlit session. Open Investing Strategy to configure one first.")
+        else:
+            report_strategy_name = st.selectbox(
+                "Strategy for this report",
+                strategy_names,
+                key="eod_report_strategy",
+            )
+            report_strategy = st.session_state.strategies[report_strategy_name]
+            st.caption(
+                "Generate this after the market close. Signal candidates are calculated from stored historical data "
+                "and the chosen strategy; the report is informational and does not place orders."
+            )
+            if st.button("📝 Generate end-of-day report", type="primary", key="generate_eod_report"):
+                try:
+                    with st.spinner("Calculating the strategy scan from saved price history..."):
+                        groups = report_strategy.get("groups", ["Nifty 500"])
+                        report_tickers = list(get_trusted_tickers_by_group(groups))
+                        report_tickers.extend(["^NSEI", NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER])
+                        if report_strategy.get("use_relative_momentum_filter", False):
+                            report_tickers.append(
+                                MAJOR_MARKET_INDICES.get(
+                                    report_strategy.get("relative_momentum_index", "Nifty 50"), "^NSEI"
+                                )
+                            )
+                        all_prices = fetch_market_data(
+                            list(dict.fromkeys(report_tickers)),
+                            period="3y",
+                        )
+                        if all_prices is None or all_prices.empty:
+                            raise ValueError("No stored price history was returned for the selected strategy.")
+                        reference = all_prices.get("^NSEI", pd.Series(dtype=float)).dropna()
+                        signal_date = reference.index[-1] if not reference.empty else all_prices.index[-1]
+                        report_prices = all_prices.loc[:signal_date].copy()
+                        if report_prices.empty:
+                            raise ValueError("No price history exists through the latest reference-index session.")
+
+                        selected_candidates = run_strategy_stock_scanner(
+                            report_strategy,
+                            price_subset=report_prices,
+                            as_of_date=signal_date,
+                        )
+                        trend_name = report_strategy.get("market_trend_index", "Nifty 50")
+                        trend_ticker = MAJOR_MARKET_INDICES.get(trend_name, "^NSEI")
+                        trend_series = report_prices[trend_ticker].dropna() if trend_ticker in report_prices else pd.Series(dtype=float)
+                        if len(trend_series) >= 200:
+                            trend_ema = trend_series.ewm(span=200, adjust=False).mean().iloc[-1]
+                            trend_state = "BULLISH (above 200 EMA)" if float(trend_series.iloc[-1]) > float(trend_ema) else "BEARISH (below / at 200 EMA)"
+                        else:
+                            trend_state = "UNKNOWN (insufficient index history for 200 EMA)"
+
+                        current_positions = report_strategy.get("positions", [])
+                        held_symbols = sorted({
+                            str(position.get("Symbol", "")).strip()
+                            for position in current_positions
+                            if isinstance(position, dict) and str(position.get("Symbol", "")).strip()
+                        })
+                        candidate_rows = []
+                        for rank, symbol in enumerate(selected_candidates, start=1):
+                            if symbol not in report_prices.columns:
+                                continue
+                            series = report_prices[symbol].dropna()
+                            if series.empty:
+                                continue
+                            latest_close = float(series.iloc[-1])
+                            def _period_return(values, sessions):
+                                if len(values) <= sessions:
+                                    return float("nan")
+                                base = float(values.iloc[-(sessions + 1)])
+                                return (float(values.iloc[-1]) / base - 1.0) * 100.0 if base > 0 else float("nan")
+                            candidate_rows.append({
+                                "Rank": rank,
+                                "Symbol": symbol,
+                                "Latest Close": latest_close,
+                                "1D Return %": _period_return(series, 1),
+                                "60D Return %": _period_return(series, 60),
+                                "252D Return %": _period_return(series, 252),
+                                "Status": "Current holding" if symbol in held_symbols else "Candidate / review",
+                            })
+                        candidate_frame = pd.DataFrame(candidate_rows)
+                        history_status = fyers_history_data.get_data_summary()
+                        last_saved_date = history_status.get("latest_date") or str(signal_date.date())
+                        generated_at = pd.Timestamp.now(tz="Asia/Kolkata").strftime("%Y-%m-%d %H:%M IST")
+                        held_not_selected = [symbol for symbol in held_symbols if symbol not in selected_candidates]
+                        report_lines = [
+                            "NSE MOMENTUM PORTFOLIO — END-OF-DAY REPORT",
+                            f"Generated: {generated_at}",
+                            f"Strategy: {report_strategy_name}",
+                            f"Signal session: {pd.Timestamp(signal_date).date()}",
+                            f"Latest date in FYERS manifest: {last_saved_date}",
+                            f"Market regime ({trend_name}): {trend_state}",
+                            f"Strategy groups: {', '.join(groups)}",
+                            f"Configured rebalance: {report_strategy.get('rebalance_freq', 'Monthly')} / day {report_strategy.get('rebalance_day', 1)}",
+                            "",
+                            "STRATEGY-ELIGIBLE SELECTIONS",
+                        ]
+                        if candidate_frame.empty:
+                            report_lines.append("No securities passed all configured filters on the latest stored session.")
+                        else:
+                            report_lines.append("Rank | Symbol | Close | 1D % | 60D % | 252D % | Status")
+                            for _, row in candidate_frame.iterrows():
+                                def _fmt(value):
+                                    return f"{float(value):+.2f}%" if pd.notna(value) and np.isfinite(float(value)) else "n/a"
+                                report_lines.append(
+                                    f'{int(row["Rank"])} | {row["Symbol"]} | ₹{row["Latest Close"]:,.2f} | '
+                                    f'{_fmt(row["1D Return %"])} | {_fmt(row["60D Return %"])} | '
+                                    f'{_fmt(row["252D Return %"])} | {row["Status"]}'
+                                )
+                        report_lines.extend(["", "CURRENT HOLDINGS NOT IN THE SCAN SELECTION"])
+                        report_lines.extend(held_not_selected or ["None recorded in this strategy session."])
+                        report_lines.extend([
+                            "",
+                            "DATA / EXECUTION NOTES",
+                            "Signals use stored daily closes and your saved rules. A signal is not an order or a guarantee of execution.",
+                            "Confirm data health, liquidity, spreads, corporate actions and position sizing before acting.",
+                            "EOD alert delivery occurs only when you press Send; this page does not run a background scheduler.",
+                        ])
+                        report_text = "\n".join(report_lines)
+                        st.session_state["_eod_report_text"] = report_text
+                        st.session_state["_eod_candidates_frame"] = candidate_frame
+                        st.session_state["_eod_report_generated_at"] = generated_at
+                        st.session_state["_eod_report_strategy_name"] = report_strategy_name
+                except Exception as exc:
+                    st.error(f"Could not generate the EOD report: {type(exc).__name__}: {exc}")
+
+            saved_report = st.session_state.get("_eod_report_text")
+            if saved_report:
+                st.markdown("#### Latest generated report")
+                st.code(saved_report, language=None)
+                st.download_button(
+                    "📥 Download EOD report (TXT)",
+                    data=saved_report.encode("utf-8"),
+                    file_name=f"nse_momentum_eod_{pd.Timestamp.now(tz='Asia/Kolkata').strftime('%Y%m%d')}.txt",
+                    mime="text/plain",
+                    key="download_eod_report",
+                )
+                saved_candidates = st.session_state.get("_eod_candidates_frame")
+                if isinstance(saved_candidates, pd.DataFrame) and not saved_candidates.empty:
+                    st.dataframe(saved_candidates, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "📥 Download report selections (CSV)",
+                        data=saved_candidates.to_csv(index=False).encode("utf-8-sig"),
+                        file_name="nse_momentum_eod_selections.csv",
+                        mime="text/csv",
+                        key="download_eod_selections",
+                    )
+
+                st.markdown("#### Alert channels")
+                st.caption(
+                    "Optional Streamlit Secrets: TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID; or "
+                    "SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM and ALERT_EMAIL_TO."
+                )
+                def _secret_value(name, default=""):
+                    try:
+                        value = st.secrets.get(name, default)
+                        return str(value or default).strip()
+                    except Exception:
+                        return str(default or "").strip()
+
+                telegram_token = _secret_value("TELEGRAM_BOT_TOKEN")
+                telegram_chat = _secret_value("TELEGRAM_CHAT_ID")
+                smtp_host = _secret_value("SMTP_HOST")
+                smtp_username = _secret_value("SMTP_USERNAME")
+                smtp_password = _secret_value("SMTP_PASSWORD")
+                smtp_from = _secret_value("SMTP_FROM", smtp_username)
+                smtp_to = _secret_value("ALERT_EMAIL_TO")
+                try:
+                    smtp_port = int(_secret_value("SMTP_PORT", "587"))
+                except ValueError:
+                    smtp_port = 587
+                status_cols = st.columns(2)
+                status_cols[0].write("Telegram: **configured**" if telegram_token and telegram_chat else "Telegram: not configured")
+                status_cols[1].write("Email: **configured**" if smtp_host and smtp_from and smtp_to else "Email: not configured")
+
+                if st.button("📨 Send report to configured channels", type="primary", key="send_eod_alerts"):
+                    destinations = 0
+                    delivered = 0
+                    delivery_messages = []
+                    if telegram_token and telegram_chat:
+                        destinations += 1
+                        ok, message = eod_reporting.send_telegram_alert(
+                            telegram_token, telegram_chat, saved_report
+                        )
+                        delivered += int(ok)
+                        delivery_messages.append(("Telegram", ok, message))
+                    if smtp_host and smtp_from and smtp_to:
+                        destinations += 1
+                        ok, message = eod_reporting.send_email_alert(
+                            subject=f"NSE Momentum EOD Report — {st.session_state.get('_eod_report_strategy_name', 'Strategy')}",
+                            body=saved_report,
+                            smtp_host=smtp_host,
+                            smtp_port=smtp_port,
+                            username=smtp_username,
+                            password=smtp_password,
+                            sender=smtp_from,
+                            recipient=smtp_to,
+                            use_tls=True,
+                        )
+                        delivered += int(ok)
+                        delivery_messages.append(("Email", ok, message))
+                    if destinations == 0:
+                        st.warning("No alert channel is configured. Add the Telegram or SMTP keys in Streamlit Secrets.")
+                    else:
+                        for channel, ok, message in delivery_messages:
+                            (st.success if ok else st.error)(f"{channel}: {message}")
+                        if delivered:
+                            st.success(f"Report delivered through {delivered} of {destinations} configured channel(s).")
+
+    st.markdown("---")
+    st.caption(
+        "The current app keeps strategy configuration in Streamlit session state. Personalized unattended alerts "
+        "require a durable saved-strategy store and scheduler; the integrated workflow here generates and sends "
+        "the report on demand, so it cannot silently send a stale or different strategy in the background."
+    )
