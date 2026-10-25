@@ -1575,9 +1575,13 @@ def _email_secret(name, default=""):
 
 def _smtp_configuration():
     username = _email_secret("SMTP_USERNAME")
+    try:
+        smtp_port = int(_email_secret("SMTP_PORT", "587") or "587")
+    except (TypeError, ValueError):
+        smtp_port = 587
     return {
         "smtp_host": _email_secret("SMTP_HOST"),
-        "smtp_port": int(_email_secret("SMTP_PORT", "587") or "587"),
+        "smtp_port": smtp_port,
         "username": username,
         "password": _email_secret("SMTP_PASSWORD"),
         "sender": _email_secret("SMTP_FROM", username),
@@ -1738,7 +1742,6 @@ def _maybe_send_rebalance_date_emails():
                 target_symbols=targets,
                 current_positions=strategy.get("positions", []),
                 before_positions=strategy.get("positions", []),
-                signal_date=now.date().isoformat(),
                 note=(
                     f"Scheduled rebalance-cycle email ({cycle_key}). This is a review/reminder only; "
                     "it does not execute the strategy rebalance or place orders."
@@ -2096,7 +2099,10 @@ if st.session_state.navigation_tab == "DASHBOARD":
                     target_symbols=scanned_results,
                     current_positions=new_positions,
                     before_positions=list(existing_positions.values()),
-                    entered_symbols=new_symbols,
+                    entered_symbols=[
+                        position["Symbol"] for position in new_positions
+                        if position.get("Symbol") not in existing_positions
+                    ],
                     exited_symbols=exited_symbols,
                     retained_symbols=retained_symbols,
                     price_by_symbol=live_or_close,
@@ -3103,6 +3109,24 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 key="eod_report_strategy",
             )
             report_strategy = st.session_state.strategies[report_strategy_name]
+            report_email_key = f"eod_report_recipient_{report_strategy_name}"
+            default_report_email = str(
+                report_strategy.get("notification_email", "") or _email_secret("ALERT_EMAIL_TO")
+            ).strip()
+            report_recipient_email = st.text_input(
+                "Email address for this strategy's updates",
+                value=default_report_email,
+                placeholder="you@example.com",
+                key=report_email_key,
+                help="This inbox receives this EOD report and can also be saved to the strategy's email settings.",
+            )
+            if report_recipient_email.strip():
+                if eod_reporting.is_valid_email_address(report_recipient_email):
+                    report_strategy["notification_email"] = report_recipient_email.strip()
+                else:
+                    st.warning("Enter a valid email address before sending or saving email updates.")
+            elif report_email_key in st.session_state:
+                report_strategy["notification_email"] = ""
             st.caption(
                 "Generate this after the market close. Signal candidates are calculated from stored historical data "
                 "and the chosen strategy; the report is informational and does not place orders."
@@ -3259,7 +3283,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 smtp_username = _secret_value("SMTP_USERNAME")
                 smtp_password = _secret_value("SMTP_PASSWORD")
                 smtp_from = _secret_value("SMTP_FROM", smtp_username)
-                smtp_to = _secret_value("ALERT_EMAIL_TO")
+                smtp_to = report_recipient_email.strip() or _secret_value("ALERT_EMAIL_TO")
                 try:
                     smtp_port = int(_secret_value("SMTP_PORT", "587"))
                 except ValueError:
