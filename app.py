@@ -1716,6 +1716,9 @@ def _maybe_send_rebalance_date_emails():
         )
         if not cycle_key or strategy.get("last_rebalance_email_cycle") == cycle_key:
             continue
+        smtp = _smtp_configuration()
+        if not (smtp["smtp_host"] and smtp["sender"]):
+            continue
         attempt_key = f"{strategy_name}|{cycle_key}"
         attempted = st.session_state.get("_rebalance_email_attempts", set())
         if attempt_key in attempted:
@@ -1805,6 +1808,18 @@ with nav_col6:
         st.rerun()
 
 st.markdown("---")
+
+scheduled_email_notice = st.session_state.get("_scheduled_email_notice")
+if scheduled_email_notice:
+    scheduled_email_status = scheduled_email_notice.get("status")
+    scheduled_email_text = (
+        f"Scheduled strategy email for '{scheduled_email_notice.get('strategy', 'strategy')}': "
+        f"{scheduled_email_notice.get('message', '')}"
+    )
+    if scheduled_email_status == "sent":
+        st.success(scheduled_email_text)
+    elif scheduled_email_status == "error":
+        st.warning(scheduled_email_text)
 
 render_fyers_connection_panel()
 
@@ -2423,7 +2438,8 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     st.markdown("#### Email Updates for This Strategy")
     st.caption(
         "Enter the inbox that should receive this strategy's scan targets, entry/exit candidates and portfolio details. "
-        "SMTP sender settings must also be configured in Streamlit Secrets."
+        "SMTP sender settings must also be configured in Streamlit Secrets. Rebalance-date emails are checked when "
+        "the app runs after 4 p.m. IST on a weekday; this session-based trigger is not a server-side scheduler."
     )
     email_col1, email_col2 = st.columns([2, 1])
     strategy_notification_email = email_col1.text_input(
