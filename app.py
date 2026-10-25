@@ -579,7 +579,11 @@ if "strategies" not in st.session_state:
             "rs_benchmark": "Nifty 500 / G-Sec",
             "min_price": 10.0,
             "skip_days": 21,
-            "positions": []
+            "positions": [],
+            "notification_email": "",
+            "email_on_scan": True,
+            "email_on_rebalance_date": True,
+            "email_on_rebalance_execution": True
         }
     }
 
@@ -1558,6 +1562,212 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
     df_res["Peak Value"] = df_res["Portfolio Value"].cummax()
     df_res["Drawdown"] = df_res["Portfolio Value"] / df_res["Peak Value"] - 1.0
     return df_res, holdings_history, prices_df
+
+# ==========================================
+# STRATEGY EMAIL NOTIFICATIONS
+# ==========================================
+def _email_secret(name, default=""):
+    try:
+        return str(st.secrets.get(name, default) or default).strip()
+    except Exception:
+        return str(default or "").strip()
+
+
+def _smtp_configuration():
+    username = _email_secret("SMTP_USERNAME")
+    try:
+        smtp_port = int(_email_secret("SMTP_PORT", "587") or "587")
+    except (TypeError, ValueError):
+        smtp_port = 587
+    return {
+        "smtp_host": _email_secret("SMTP_HOST"),
+        "smtp_port": smtp_port,
+        "username": username,
+        "password": _email_secret("SMTP_PASSWORD"),
+        "sender": _email_secret("SMTP_FROM", username),
+    }
+
+
+def _latest_saved_price_map(symbols):
+    symbols = list(dict.fromkeys(str(symbol).strip() for symbol in (symbols or []) if str(symbol).strip()))
+    if not symbols:
+        return {}, None
+    frame = fetch_market_data(symbols, period="5d")
+    if frame is None or frame.empty:
+        return {}, None
+    price_map = {}
+    for symbol in symbols:
+        if symbol not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[symbol], errors="coerce").dropna()
+        if not series.empty and float(series.iloc[-1]) > 0:
+            price_map[symbol] = float(series.iloc[-1])
+    reference = frame["^NSEI"].dropna() if "^NSEI" in frame.columns else pd.Series(dtype=float)
+    if not reference.empty:
+        signal_date = reference.index[-1].date().isoformat()
+    else:
+        any_dates = frame.index[frame.notna().any(axis=1)]
+        signal_date = any_dates[-1].date().isoformat() if len(any_dates) else None
+    return price_map, signal_date
+
+
+def _send_strategy_update_email(
+    strategy_name,
+    strategy,
+    event_type,
+    target_symbols=None,
+    current_positions=None,
+    before_positions=None,
+    entered_symbols=None,
+    exited_symbols=None,
+    retained_symbols=None,
+    price_by_symbol=None,
+    signal_date=None,
+    note=None,
+):
+    """Send one configured strategy update by SMTP; never submits broker orders."""
+    toggle_by_event = {
+        "SCAN": "email_on_scan",
+        "REBALANCE_DATE": "email_on_rebalance_date",
+        "REBALANCE_EXECUTED": "email_on_rebalance_execution",
+    }
+    toggle_name = toggle_by_event.get(event_type)
+    if toggle_name and not bool(strategy.get(toggle_name, True)):
+        return {"status": "skipped", "message": f"Email notification is disabled for {event_type.lower().replace('_', ' ')}."}
+
+    recipient = str(strategy.get("notification_email", "") or "").strip()
+    if not recipient:
+        return {"status": "skipped", "message": "Add a notification email address in this strategy's settings to receive updates."}
+    if not eod_reporting.is_valid_email_address(recipient):
+        return {"status": "error", "message": "The strategy notification email address is not valid. Check the address in strategy settings."}
+
+    smtp = _smtp_configuration()
+    if not (smtp["smtp_host"] and smtp["sender"]):
+        return {
+            "status": "error",
+            "message": "Recipient saved, but email delivery is not configured. Add SMTP_HOST, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM in Streamlit Secrets.",
+        }
+
+    current_positions = list(current_positions or [])
+    before_positions = list(before_positions if before_positions is not None else current_positions)
+    symbols = list(target_symbols or [])
+    symbols.extend(
+        str(position.get("Symbol", "")).strip()
+        for position in current_positions + before_positions
+        if isinstance(position, dict)
+    )
+    symbols.extend(str(symbol).strip() for symbol in (exited_symbols or []))
+    symbols = list(dict.fromkeys(symbol for symbol in symbols if symbol))
+
+    if price_by_symbol is None:
+        price_by_symbol, detected_date = _latest_saved_price_map(symbols)
+        if signal_date is None:
+            signal_date = detected_date
+    else:
+        price_by_symbol = dict(price_by_symbol)
+    body = eod_reporting.build_strategy_update_report(
+        strategy_name=strategy_name,
+        strategy_config=strategy,
+        event_type=event_type,
+        target_symbols=target_symbols,
+        current_positions=current_positions,
+        before_positions=before_positions,
+        price_by_symbol=price_by_symbol,
+        entered_symbols=entered_symbols,
+        exited_symbols=exited_symbols,
+        retained_symbols=retained_symbols,
+        signal_date=signal_date,
+        note=note,
+    )
+    try:
+        smtp_port = int(smtp["smtp_port"] or 587)
+    except (TypeError, ValueError):
+        smtp_port = 587
+    ok, message = eod_reporting.send_email_alert(
+        subject=f"NSE Momentum — {strategy_name} — {event_type.replace('_', ' ').title()}",
+        body=body,
+        smtp_host=smtp["smtp_host"],
+        smtp_port=smtp_port,
+        username=smtp["username"],
+        password=smtp["password"],
+        sender=smtp["sender"],
+        recipient=recipient,
+        use_tls=True,
+    )
+    return {"status": "sent" if ok else "error", "message": message}
+
+
+def _maybe_send_rebalance_date_emails():
+    """Send one report per due strategy/cadence while the Streamlit app is active."""
+    now = pd.Timestamp.now(tz="Asia/Kolkata")
+    # Daily reports should use after-close data. This is an in-app trigger, not a
+    # server-side scheduler; the app must be visited after 4 p.m. IST on a weekday.
+    if now.weekday() >= 5 or now.hour < 16:
+        return
+    for strategy_name, strategy in st.session_state.get("strategies", {}).items():
+        if strategy.get("status", "Active") != "Active":
+            continue
+        if not strategy.get("notification_email") or not strategy.get("email_on_rebalance_date", True):
+            continue
+        cycle_key = eod_reporting.rebalance_notification_cycle(
+            strategy.get("rebalance_freq", "Monthly"),
+            strategy.get("rebalance_day", 1),
+            now=now.to_pydatetime(),
+        )
+        if not cycle_key or strategy.get("last_rebalance_email_cycle") == cycle_key:
+            continue
+        smtp = _smtp_configuration()
+        if not (smtp["smtp_host"] and smtp["sender"]):
+            continue
+        attempt_key = f"{strategy_name}|{cycle_key}"
+        attempted = st.session_state.get("_rebalance_email_attempts", set())
+        if attempt_key in attempted:
+            continue
+        attempted = set(attempted)
+        attempted.add(attempt_key)
+        st.session_state["_rebalance_email_attempts"] = attempted
+
+        try:
+            current_symbols = [
+                position.get("Symbol")
+                for position in strategy.get("positions", [])
+                if isinstance(position, dict) and position.get("Symbol")
+            ]
+            targets = run_strategy_stock_scanner(
+                strategy,
+                current_holdings=current_symbols,
+                as_of_date=now.tz_localize(None),
+            )
+            outcome = _send_strategy_update_email(
+                strategy_name=strategy_name,
+                strategy=strategy,
+                event_type="REBALANCE_DATE",
+                target_symbols=targets,
+                current_positions=strategy.get("positions", []),
+                before_positions=strategy.get("positions", []),
+                note=(
+                    f"Scheduled rebalance-cycle email ({cycle_key}). This is a review/reminder only; "
+                    "it does not execute the strategy rebalance or place orders."
+                ),
+            )
+            if outcome["status"] == "sent":
+                strategy["last_rebalance_email_cycle"] = cycle_key
+            st.session_state["_scheduled_email_notice"] = {
+                "strategy": strategy_name,
+                **outcome,
+            }
+        except Exception as exc:
+            st.session_state["_scheduled_email_notice"] = {
+                "strategy": strategy_name,
+                "status": "error",
+                "message": f"Could not generate scheduled email: {type(exc).__name__}.",
+            }
+
+
+# Attempt after-close scheduled strategy emails once per due cadence while the app
+# session is active; no live orders are submitted by this process.
+_maybe_send_rebalance_date_emails()
+
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
@@ -1598,6 +1808,18 @@ with nav_col6:
         st.rerun()
 
 st.markdown("---")
+
+scheduled_email_notice = st.session_state.get("_scheduled_email_notice")
+if scheduled_email_notice:
+    scheduled_email_status = scheduled_email_notice.get("status")
+    scheduled_email_text = (
+        f"Scheduled strategy email for '{scheduled_email_notice.get('strategy', 'strategy')}': "
+        f"{scheduled_email_notice.get('message', '')}"
+    )
+    if scheduled_email_status == "sent":
+        st.success(scheduled_email_text)
+    elif scheduled_email_status == "error":
+        st.warning(scheduled_email_text)
 
 render_fyers_connection_panel()
 
@@ -1800,6 +2022,24 @@ if st.session_state.navigation_tab == "DASHBOARD":
                 current_symbols = [p["Symbol"] for p in strat.get("positions", [])]
                 scanned_tickers = run_strategy_stock_scanner(strat, current_holdings=current_symbols, as_of_date=pd.Timestamp.today())
                 st.session_state[f"scanned_results_{strat_name}"] = scanned_tickers
+                st.session_state[f"strategy_email_notice_{strat_name}"] = _send_strategy_update_email(
+                    strategy_name=strat_name,
+                    strategy=strat,
+                    event_type="SCAN",
+                    target_symbols=scanned_tickers,
+                    current_positions=strat.get("positions", []),
+                    before_positions=strat.get("positions", []),
+                    note="Triggered by manually running the live stock scanner. Signals do not place orders.",
+                )
+
+        email_notice = st.session_state.get(f"strategy_email_notice_{strat_name}")
+        if email_notice:
+            if email_notice.get("status") == "sent":
+                st.success(f"Email update: {email_notice.get('message', 'Sent')}")
+            elif email_notice.get("status") == "error":
+                st.warning(f"Email update: {email_notice.get('message', 'Delivery failed')}")
+            elif email_notice.get("status") == "skipped" and st.session_state.get(f"scanned_results_{strat_name}") is not None:
+                st.info(f"Email update not sent: {email_notice.get('message', 'Not configured')}")
 
         scanned_results = st.session_state.get(f"scanned_results_{strat_name}", None)
 
@@ -1867,6 +2107,26 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
                 strat["positions"] = new_positions
                 strat["realized_pnl"] = strat.get("realized_pnl", 0.0) + newly_realized
+                st.session_state[f"strategy_email_notice_{strat_name}"] = _send_strategy_update_email(
+                    strategy_name=strat_name,
+                    strategy=strat,
+                    event_type="REBALANCE_EXECUTED",
+                    target_symbols=scanned_results,
+                    current_positions=new_positions,
+                    before_positions=list(existing_positions.values()),
+                    entered_symbols=[
+                        position["Symbol"] for position in new_positions
+                        if position.get("Symbol") not in existing_positions
+                    ],
+                    exited_symbols=exited_symbols,
+                    retained_symbols=retained_symbols,
+                    price_by_symbol=live_or_close,
+                    signal_date=datetime.now().strftime("%Y-%m-%d"),
+                    note=(
+                        f"Portfolio rebalance was executed in the app. Realized P&L booked for exits during this "
+                        f"rebalance: ₹{newly_realized:,.2f}. This app update does not submit broker orders."
+                    ),
+                )
                 st.session_state[f"scanned_results_{strat_name}"] = None
                 st.success(f"Rebalanced '{strat_name}': kept {len(retained_symbols)} in the buffer, exited {len(exited_symbols)}, entered {len(new_symbols)} new.")
                 st.rerun()
@@ -2175,6 +2435,38 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     )
 
     st.markdown("---")
+    st.markdown("#### Email Updates for This Strategy")
+    st.caption(
+        "Enter the inbox that should receive this strategy's scan targets, entry/exit candidates and portfolio details. "
+        "SMTP sender settings must also be configured in Streamlit Secrets. Rebalance-date emails are checked when "
+        "the app runs after 4 p.m. IST on a weekday; this session-based trigger is not a server-side scheduler."
+    )
+    email_col1, email_col2 = st.columns([2, 1])
+    strategy_notification_email = email_col1.text_input(
+        "Email address for strategy updates",
+        value=str(edit_strat.get("notification_email", "") or ""),
+        placeholder="you@example.com",
+        key=f"strategy_notification_email_{st.session_state.editing_strategy_name or 'new'}",
+    )
+    with email_col2:
+        st.write("Send emails when")
+        email_on_scan = st.checkbox(
+            "I run a scan",
+            value=bool(edit_strat.get("email_on_scan", True)),
+            key=f"email_on_scan_{st.session_state.editing_strategy_name or 'new'}",
+        )
+        email_on_rebalance_date = st.checkbox(
+            "Rebalance date is due",
+            value=bool(edit_strat.get("email_on_rebalance_date", True)),
+            key=f"email_on_rebalance_date_{st.session_state.editing_strategy_name or 'new'}",
+        )
+        email_on_rebalance_execution = st.checkbox(
+            "I execute a rebalance",
+            value=bool(edit_strat.get("email_on_rebalance_execution", True)),
+            key=f"email_on_rebalance_execution_{st.session_state.editing_strategy_name or 'new'}",
+        )
+
+    st.markdown("---")
     save_label = "💾 Update Strategy Config" if edit_mode else "💾 Deploy New Strategy Profile"
     if st.button(save_label, type="primary", use_container_width=True):
         # Validate/normalise inputs first, then update session state atomically.
@@ -2193,6 +2485,8 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
                 )
             if float(tot_alloc) <= 0:
                 raise ValueError("Allocated capital must be greater than ₹0.")
+            if str(strategy_notification_email or "").strip() and not eod_reporting.is_valid_email_address(strategy_notification_email):
+                raise ValueError("Please enter a valid notification email address, or leave it blank.")
 
             selected_groups = []
             if grp_nifty500: selected_groups.append("Nifty 500")
@@ -2260,6 +2554,11 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
                 "market_trend_vstop_atr_period": int(trend_vstop_atr),
                 "market_trend_vstop_multiplier": float(trend_vstop_multiplier),
                 "market_trend_exit_on_bearish": bool(market_trend_exit_on_bearish),
+                "notification_email": str(strategy_notification_email or "").strip(),
+                "email_on_scan": bool(email_on_scan),
+                "email_on_rebalance_date": bool(email_on_rebalance_date),
+                "email_on_rebalance_execution": bool(email_on_rebalance_execution),
+                "last_rebalance_email_cycle": edit_strat.get("last_rebalance_email_cycle"),
                 "positions": edit_strat.get("positions", []),
             }
             st.session_state.strategies[target_name] = saved_config
@@ -2826,6 +3125,24 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 key="eod_report_strategy",
             )
             report_strategy = st.session_state.strategies[report_strategy_name]
+            report_email_key = f"strategy_notification_email_{report_strategy_name}"
+            default_report_email = str(
+                report_strategy.get("notification_email", "") or _email_secret("ALERT_EMAIL_TO")
+            ).strip()
+            report_recipient_email = st.text_input(
+                "Email address for this strategy's updates",
+                value=default_report_email,
+                placeholder="you@example.com",
+                key=report_email_key,
+                help="This inbox receives this EOD report and can also be saved to the strategy's email settings.",
+            )
+            if report_recipient_email.strip():
+                if eod_reporting.is_valid_email_address(report_recipient_email):
+                    report_strategy["notification_email"] = report_recipient_email.strip()
+                else:
+                    st.warning("Enter a valid email address before sending or saving email updates.")
+            elif report_email_key in st.session_state:
+                report_strategy["notification_email"] = ""
             st.caption(
                 "Generate this after the market close. Signal candidates are calculated from stored historical data "
                 "and the chosen strategy; the report is informational and does not place orders."
@@ -2932,7 +3249,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                             "DATA / EXECUTION NOTES",
                             "Signals use stored daily closes and your saved rules. A signal is not an order or a guarantee of execution.",
                             "Confirm data health, liquidity, spreads, corporate actions and position sizing before acting.",
-                            "EOD alert delivery occurs only when you press Send; this page does not run a background scheduler.",
+                            "This manually generated EOD report is sent only when you press Send. Rebalance-date emails are checked separately when the app runs after 4 p.m. IST on a weekday.",
                         ])
                         report_text = "\n".join(report_lines)
                         st.session_state["_eod_report_text"] = report_text
@@ -2982,7 +3299,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 smtp_username = _secret_value("SMTP_USERNAME")
                 smtp_password = _secret_value("SMTP_PASSWORD")
                 smtp_from = _secret_value("SMTP_FROM", smtp_username)
-                smtp_to = _secret_value("ALERT_EMAIL_TO")
+                smtp_to = report_recipient_email.strip()
                 try:
                     smtp_port = int(_secret_value("SMTP_PORT", "587"))
                 except ValueError:
@@ -3027,7 +3344,7 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
 
     st.markdown("---")
     st.caption(
-        "The current app keeps strategy configuration in Streamlit session state. Personalized unattended alerts "
-        "require a durable saved-strategy store and scheduler; the integrated workflow here generates and sends "
-        "the report on demand, so it cannot silently send a stale or different strategy in the background."
+        "Strategy emails send when you run a scan, execute a rebalance, or the app checks a due rebalance cycle after 4 p.m. IST on a weekday. "
+        "Streamlit does not run this check while idle or closed, and strategy settings are session-scoped; guaranteed unattended delivery "
+        "requires a durable private strategy store and an external scheduler."
     )
