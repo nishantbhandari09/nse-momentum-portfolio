@@ -937,4 +937,8 @@ The **End-of-Day Report & Alerts** tab can generate a strategy-specific report f
 - Telegram: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - Email: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, `ALERT_EMAIL_TO`
 
-Reports are generated and sent on demand. This version does not send unattended personalized reports because strategy profiles currently live in Streamlit session state rather than a durable strategy store; a scheduler should not guess which strategy to send.
+For per-strategy updates, open **Investing Strategy → edit strategy → Email Updates for This Strategy** and enter the recipient email. Enable any combination of scan, rebalance-date, and completed-rebalance emails. A scan email includes target entries, exit candidates, retained holdings, latest available prices, quantities and indicative unrealized P&L. A completed-rebalance email includes the entry/exit changes made in the app.
+
+Rebalance-date email checks run when the Streamlit app executes after 4 p.m. IST on a weekday. This is an in-app trigger, not an always-on scheduler; it does not fire while the app is idle or closed. It sends a reminder/report for the due cadence and **does not execute the rebalance or place orders**. Strategy settings, including the email address, are stored in the current Streamlit session; use **Backups & Downloads → Download strategies backup (JSON)** to keep a copy, and restore it after starting a fresh session. For guaranteed unattended delivery while the app is closed, the app would need a durable private strategy store and an external scheduler.
+
+The EOD report page also has an email-recipient field for one-off report delivery. SMTP sender credentials remain in Streamlit Secrets; the recipient email is not written to this public GitHub repository.
