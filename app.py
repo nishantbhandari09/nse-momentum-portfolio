@@ -898,7 +898,7 @@ MAJOR_MARKET_INDICES = {
 }
 
 
-def _market_trend_is_bullish(strat, as_of_date=None):
+def _market_trend_is_bullish(strat, as_of_date=None, price_subset=None):
     """Return True when the selected index is above its configured trend indicator."""
     if not strat.get("use_market_trend_filter", False):
         return True
@@ -907,7 +907,12 @@ def _market_trend_is_bullish(strat, as_of_date=None):
     if not ticker:
         return True
     try:
-        history = fetch_market_data([ticker], period="5y")
+        # During a live scan, use the same panel that has just received FYERS LTPs.
+        # During scheduled/backtest calls with no panel, read persisted history.
+        if price_subset is not None and ticker in price_subset.columns:
+            history = price_subset[[ticker]].copy()
+        else:
+            history = fetch_market_data([ticker], period="5y")
         if history.empty or ticker not in history.columns:
             return False
         series = history[ticker].dropna()
@@ -1075,10 +1080,14 @@ def _normalise_scan_price_panel(price_panel):
 
 def _overlay_live_quotes_on_scan_panel(price_panel, quotes):
     """Replace the latest observation with live FYERS LTPs without inventing dates."""
-    if price_panel is None or price_panel.empty or not quotes:
+    if not quotes:
         return price_panel, 0
-    panel = price_panel.copy()
-    last_date = panel.index.max()
+    if price_panel is None or price_panel.empty:
+        last_date = pd.Timestamp.now(tz="Asia/Kolkata").tz_localize(None).normalize()
+        panel = pd.DataFrame(index=pd.DatetimeIndex([last_date], name="Date"))
+    else:
+        panel = price_panel.copy()
+        last_date = panel.index.max()
     applied = 0
     for raw_ticker, raw_price in quotes.items():
         ticker = _normalise_scan_ticker(raw_ticker)
@@ -1278,7 +1287,9 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
             "Refresh the NSE archive or run the FYERS history updater, then scan again."
         )
 
-    trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
+    trend_bullish = _market_trend_is_bullish(
+        strat, as_of_date=as_of_date, price_subset=prices_df
+    )
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
         # Bearish regime: do not open new positions. Existing holdings may be
         # liquidated at the backtest rebalance if the exit rule is enabled.
