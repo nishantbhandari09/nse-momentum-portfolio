@@ -1009,6 +1009,33 @@ def _ensure_scan_index_history(ticker, min_bars=220):
 
 def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None, diagnostics=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
+    scan_notes = []
+    filter_counts = {}
+    group_tickers = []
+    prices_df = pd.DataFrame()
+    filtered_df = pd.DataFrame()
+    required_index_tickers = []
+
+    def _scan_exit(result, stage, reason):
+        if isinstance(diagnostics, dict):
+            diagnostics.update({
+                "stage": stage,
+                "reason": reason,
+                "groups": list(selected_groups),
+                "universe_tickers": int(len(group_tickers)),
+                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)),
+                "price_rows": int(len(prices_df)),
+                "price_columns": int(len(prices_df.columns)),
+                "first_price_date": str(prices_df.index.min().date()) if not prices_df.empty else None,
+                "last_price_date": str(prices_df.index.max().date()) if not prices_df.empty else None,
+                "missing_benchmarks": [
+                    t for t in required_index_tickers
+                    if t not in prices_df.columns or prices_df[t].dropna().empty
+                ],
+                "filter_counts": dict(filter_counts),
+                "notes": list(scan_notes),
+            })
+        return result
 
     use_relative_momentum = bool(strat.get("use_relative_momentum_filter", False))
     relative_index_name = strat.get("relative_momentum_index", "Nifty 50")
@@ -1017,19 +1044,52 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     if price_subset is None:
         group_tickers = get_trusted_tickers_by_group(selected_groups)
         fetch_tickers = list(group_tickers)
+        if strat.get("use_rs", True):
+            rs_benchmark_name = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
+            required_index_tickers.append("^NSEI" if rs_benchmark_name == "Nifty 50 / Liquid ETF" else NIFTY_REGIME_TICKER)
+        if use_relative_momentum:
+            required_index_tickers.append(relative_index_ticker)
+        if strat.get("use_market_trend_filter", False):
+            required_index_tickers.append(
+                MAJOR_MARKET_INDICES.get(strat.get("market_trend_index", "Nifty 50"), "^NSEI")
+            )
+        required_index_tickers = list(dict.fromkeys(required_index_tickers))
+        for index_ticker in required_index_tickers:
+            note = _ensure_scan_index_history(index_ticker)
+            if note:
+                scan_notes.append(note)
         if use_relative_momentum and relative_index_ticker not in fetch_tickers:
             fetch_tickers.append(relative_index_ticker)
         prices_df = fetch_market_data(fetch_tickers, period="2y")
         candidate_tickers = set(group_tickers)
     else:
-        prices_df = price_subset
+        prices_df = price_subset.copy()
         candidate_tickers = None
 
-    if prices_df.empty:
-        return []
+    if prices_df is None or prices_df.empty:
+        return _scan_exit(
+            [], "price loading",
+            "No historical price rows loaded for this strategy universe. Check the NSE archive and FYERS history.",
+        )
 
+    prices_df = prices_df.sort_index()
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
+    if isinstance(diagnostics, dict):
+        diagnostics.update({
+            "groups": list(selected_groups),
+            "universe_tickers": int(len(group_tickers)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "price_rows": int(len(prices_df)),
+            "price_columns": int(len(prices_df.columns)),
+            "first_price_date": str(prices_df.index.min().date()),
+            "last_price_date": str(prices_df.index.max().date()),
+            "missing_benchmarks": [
+                t for t in required_index_tickers
+                if t not in prices_df.columns or prices_df[t].dropna().empty
+            ],
+            "notes": list(scan_notes),
+        })
 
     # Backtest calls pass a historical price matrix that also contains benchmark
     # indices and always-fetched overlays. Keep ETF-only backtests inside the
@@ -1051,6 +1111,10 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         filtered_df = filtered_df.loc[:, [
             c for c in filtered_df.columns if c in selected_assets
         ]]
+
+    filter_counts["selected universe with prices"] = int(len(filtered_df.columns))
+    if filtered_df.empty:
+        return _scan_exit([], "universe selection", "No selected-universe symbols matched the downloaded price panel. The constituent list or ticker aliases may be the issue.")
 
     trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
