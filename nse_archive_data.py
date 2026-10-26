@@ -178,6 +178,54 @@ def list_all_symbols() -> list[str]:
     return sorted(f"{symbol}.NS" for symbol in symbols if symbol and symbol != "NAN")
 
 
+def prefetch_years(start, end) -> dict:
+    """Download and verify all permanent NSE archive assets needed for a date range.
+
+    This deliberately caches yearly Parquet assets on disk without expanding the
+    whole stock universe into memory. It is useful before a wide backtest.
+    """
+    start_ts = pd.Timestamp(start).normalize()
+    end_ts = pd.Timestamp(end).normalize()
+    if end_ts < start_ts:
+        raise ValueError("End date must be on or after start date.")
+    manifest = get_manifest(force_refresh=True)
+    years_info = manifest.get("years", {})
+    requested_years = list(range(start_ts.year, end_ts.year + 1))
+    cached_years = []
+    bytes_total = 0
+    rows_total = 0
+    missing_years = []
+    for year in requested_years:
+        info = years_info.get(str(year))
+        if not info:
+            missing_years.append(year)
+            continue
+        path = ensure_asset(
+            str(info.get("asset", f"prices_adj_{year}.parquet")),
+            info.get("sha256"),
+        )
+        cached_years.append(year)
+        bytes_total += path.stat().st_size
+        rows_total += int(info.get("rows", 0) or 0)
+    if missing_years:
+        raise FileNotFoundError(
+            "The permanent NSE archive is missing data for year(s): "
+            + ", ".join(str(year) for year in missing_years)
+            + ". Re-run the Update all-stock NSE historical archive workflow."
+        )
+    return {
+        "years": cached_years,
+        "years_cached": len(cached_years),
+        "bytes": bytes_total,
+        "megabytes": round(bytes_total / (1024 * 1024), 2),
+        "rows_across_years": rows_total,
+        "symbols": int(manifest.get("total_symbols", 0) or 0),
+        "first_date": manifest.get("first_date"),
+        "latest_date": manifest.get("last_date"),
+        "generated_at": manifest.get("generated_at_utc"),
+    }
+
+
 def _normalise_ticker(ticker: str) -> str:
     value = str(ticker).strip().upper()
     if value.endswith(".NS"):
