@@ -2393,10 +2393,25 @@ if st.session_state.navigation_tab == "DASHBOARD":
             run_scan = st.button("🚀 Run Live Stock Scan for this Strategy", type="primary", use_container_width=True)
 
         if run_scan:
+            scan_diagnostics = {}
             with st.spinner("Executing strategy parameters against selected asset groups..."):
                 current_symbols = [p["Symbol"] for p in strat.get("positions", [])]
-                scanned_tickers = run_strategy_stock_scanner(strat, current_holdings=current_symbols, as_of_date=pd.Timestamp.today())
+                try:
+                    scanned_tickers = run_strategy_stock_scanner(
+                        strat,
+                        current_holdings=current_symbols,
+                        as_of_date=pd.Timestamp.today(),
+                        diagnostics=scan_diagnostics,
+                    )
+                except Exception as exc:
+                    scanned_tickers = []
+                    scan_diagnostics.update({
+                        "stage": "scan error",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "groups": list(strat.get("groups", ["Nifty 500"])),
+                    })
                 st.session_state[f"scanned_results_{strat_name}"] = scanned_tickers
+                st.session_state[f"scan_diagnostics_{strat_name}"] = scan_diagnostics
                 st.session_state[f"strategy_email_notice_{strat_name}"] = _send_strategy_update_email(
                     strategy_name=strat_name,
                     strategy=strat,
@@ -2420,6 +2435,35 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         if scanned_results is not None:
             st.success(f"Scan Complete! Found **{len(scanned_results)}** target portfolio stocks across selected groups based on strategy rules.")
+            if not scanned_results:
+                scan_diagnostics = st.session_state.get(f"scan_diagnostics_{strat_name}", {})
+                with st.expander("Why did the scan return no stocks?", expanded=True):
+                    st.warning(scan_diagnostics.get(
+                        "reason",
+                        "No symbols matched the strategy. Check the diagnostics and selected filters below.",
+                    ))
+                    diag_cols = st.columns(4)
+                    diag_cols[0].metric("Universe symbols", f'{scan_diagnostics.get("universe_tickers", 0):,}')
+                    diag_cols[1].metric("Symbols with prices", f'{scan_diagnostics.get("universe_symbols_with_prices", 0):,}')
+                    diag_cols[2].metric("Price rows", f'{scan_diagnostics.get("price_rows", 0):,}')
+                    diag_cols[3].metric("Price columns", f'{scan_diagnostics.get("price_columns", 0):,}')
+                    st.caption(
+                        f"Stopped at: {scan_diagnostics.get('stage', 'unknown')} | "
+                        f"Price dates: {scan_diagnostics.get('first_price_date') or '—'} to "
+                        f"{scan_diagnostics.get('last_price_date') or '—'}"
+                    )
+                    counts = scan_diagnostics.get("filter_counts", {})
+                    if counts:
+                        st.dataframe(
+                            pd.DataFrame([{"Filter stage": name, "Symbols remaining": count} for name, count in counts.items()]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    for note in scan_diagnostics.get("notes", []):
+                        st.info(note)
+                    missing = scan_diagnostics.get("missing_benchmarks", [])
+                    if missing:
+                        st.error("Missing benchmark history: " + ", ".join(missing))
 
             sc_col1, sc_col2 = st.columns(2)
             with sc_col1:
