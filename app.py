@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 import requests
 import json
 import base64
@@ -20,6 +21,7 @@ from fyers_auth import (
 import momentum_data
 import index_history_data
 import fyers_history_data
+import fyers_chart_data
 import nse_history_data
 import nse_archive_data
 import data_health
@@ -3062,28 +3064,22 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             "Weekly": "W",
             "Monthly": "M",
         }
-        selected_interval = st.selectbox(
-            "TradingView interval",
-            options=list(chart_interval_labels),
-            index=2,
-            key="tradingview_chart_interval",
-        )
-        st.markdown("#### Price chart")
-        # TradingView confirms that some symbols can be viewed on its own site but
-        # cannot be displayed in third-party widgets. The Nifty 500 chart in
-        # particular returns "This symbol is only available on TradingView".
-        # Do not render a knowingly broken embedded widget for that index.
-        if selected_symbol == "^CRSLDX":
-            st.warning(
-                "TradingView restricts the Nifty 500 symbol in embedded charts. "
-                "The ticker is valid, but TradingView does not permit it to render inside this app. "
-                "Open the official TradingView chart below."
+        selected_is_fyers_index = selected_symbol.startswith("^")
+        if selected_is_fyers_index:
+            selected_interval = "Daily"
+        else:
+            selected_interval = st.selectbox(
+                "TradingView interval",
+                options=list(chart_interval_labels),
+                index=2,
+                key="tradingview_chart_interval",
             )
-            st.link_button(
-                "Open Nifty 500 chart on TradingView",
-                "https://www.tradingview.com/symbols/NSE-CNX500/",
-                type="primary",
-                use_container_width=True,
+
+        st.markdown("#### Price chart")
+        if selected_is_fyers_index:
+            st.info(
+                "Index charts are plotted inside Happy Trade from FYERS OHLC candles. "
+                "This avoids TradingView's restriction on embedding some index symbols."
             )
         else:
             components.html(
@@ -3097,9 +3093,8 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
                 scrolling=False,
             )
         st.caption(
-            "TradingView charts are for visualization only. A few symbols are not permitted in embedded widgets "
-            "and must be opened on TradingView directly. Live scan quotes come from FYERS; stored FYERS/NSE data "
-            "remains the source for scanning calculations, historical metrics, and backtests."
+            "TradingView is used for stock and additional index embeds where allowed. Core Nifty indices use FYERS candles "
+            "and a native in-app chart. Scanner and backtest calculations continue to use the app's verified stored data."
         )
 
         is_tradingview_only_index = selected_symbol in tv_charts.TRADINGVIEW_ONLY_INDEXES
@@ -3113,6 +3108,92 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             fyers_history_data.load_ohlcv(selected_symbol)
             if not is_tradingview_only_index else pd.DataFrame()
         )
+        native_index_fetch_used = False
+
+        if selected_is_fyers_index:
+            # Streamlit's current FYERS OAuth session can fetch daily index candles
+            # directly. The chart-only cache remains in this session and does not
+            # modify backtest data files or mark the data as persistently audited.
+            native_slug = selected_symbol.lstrip("^").lower()
+            today_ist = pd.Timestamp.now(tz="Asia/Kolkata").date()
+            default_fetch_start = max(
+                pd.Timestamp("2021-01-01").date(),
+                today_ist - timedelta(days=365 * 5),
+            )
+            with st.expander(
+                "Load / refresh candles from your connected FYERS account",
+                expanded=fyers_ohlcv.empty,
+            ):
+                fetch_date_cols = st.columns(2)
+                with fetch_date_cols[0]:
+                    fyers_fetch_start = st.date_input(
+                        "FYERS history start date",
+                        value=default_fetch_start,
+                        key=f"fyers_chart_start_{native_slug}",
+                    )
+                with fetch_date_cols[1]:
+                    fyers_fetch_end = st.date_input(
+                        "FYERS history end date",
+                        value=today_ist,
+                        key=f"fyers_chart_end_{native_slug}",
+                    )
+                cache_slot = f"_native_fyers_chart_{native_slug}"
+                cached_chart = st.session_state.get(cache_slot)
+                if (
+                    isinstance(cached_chart, dict)
+                    and cached_chart.get("start") == fyers_fetch_start.isoformat()
+                    and cached_chart.get("end") == fyers_fetch_end.isoformat()
+                    and isinstance(cached_chart.get("frame"), pd.DataFrame)
+                ):
+                    fyers_ohlcv = cached_chart["frame"].copy()
+                    native_index_fetch_used = True
+                    st.caption(
+                        f"Using candles fetched from FYERS for {cached_chart['start']} to {cached_chart['end']} "
+                        "in this app session."
+                    )
+                if "fyers_access_token" not in st.session_state:
+                    st.warning("Connect FYERS in the connection panel above to fetch index candles.")
+                if st.button(
+                    "Fetch / refresh index candles from FYERS",
+                    type="primary",
+                    use_container_width=True,
+                    disabled="fyers_access_token" not in st.session_state,
+                    key=f"fetch_fyers_chart_{native_slug}",
+                ):
+                    if fyers_fetch_start > fyers_fetch_end:
+                        st.error("Start date must be on or before end date.")
+                    else:
+                        try:
+                            with st.spinner("Requesting daily candles from FYERS..."):
+                                fetched_history = fyers_chart_data.fetch_index_history(
+                                    get_fyers_client(),
+                                    selected_symbol,
+                                    fyers_fetch_start,
+                                    fyers_fetch_end,
+                                )
+                            if fetched_history.empty:
+                                st.warning(
+                                    "FYERS returned no candles for this symbol and date range. "
+                                    "Check your FYERS history entitlement and index symbol availability."
+                                )
+                            else:
+                                fyers_ohlcv = fetched_history
+                                native_index_fetch_used = True
+                                st.session_state[cache_slot] = {
+                                    "start": fyers_fetch_start.isoformat(),
+                                    "end": fyers_fetch_end.isoformat(),
+                                    "frame": fetched_history,
+                                }
+                                st.success(
+                                    f"Loaded {len(fetched_history):,} daily candles from FYERS "
+                                    f"({fetched_history['Date'].min().date()} to {fetched_history['Date'].max().date()})."
+                                )
+                        except Exception as exc:
+                            st.error(
+                                f"Could not fetch this index from FYERS ({type(exc).__name__}): {exc}. "
+                                "Confirm FYERS is connected and your API app has historical-data permission."
+                            )
+
         if not nse_ohlcv.empty:
             chart_frame = nse_ohlcv.copy()
             chart_source = "NSE bhavcopy archive (split/bonus-adjusted proxy; no dividend adjustment)"
@@ -3123,16 +3204,21 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
         elif not fyers_ohlcv.empty:
             chart_frame = fyers_ohlcv.copy()
             chart_frame["Chart Close"] = chart_frame["Close"]
-            chart_source = "FYERS API saved daily OHLCV"
+            chart_source = (
+                "FYERS API history fetched in this session"
+                if native_index_fetch_used else "FYERS API saved daily OHLCV"
+            )
         else:
             chart_frame = pd.DataFrame()
             chart_source = "No stored candles for this symbol"
 
         if chart_frame.empty:
             st.warning(
-                f"No verified local FYERS/NSE candles were found for {selected_symbol}. "
-                "The TradingView chart above is independent and should still load. Stored-data metrics and CSV export "
-                "require locally stored historical candles; legacy index CSVs without a FYERS source marker are not trusted."
+                (
+                    f"No verified local FYERS/NSE candles were found for {selected_symbol}. "
+                    "For Nifty index symbols, connect FYERS and use the fetch panel above to draw the chart here. "
+                    "Legacy index CSVs without a FYERS source marker are not treated as trusted data."
+                )
             )
         else:
             chart_frame["Date"] = pd.to_datetime(chart_frame["Date"], errors="coerce")
@@ -3142,13 +3228,14 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             range_cols = st.columns(2)
             with range_cols[0]:
                 chart_start = st.date_input(
-                    "Stored-data start date", value=max(min_date, max_date - timedelta(days=365)),
-                    min_value=min_date, max_value=max_date, key="price_chart_start"
+                    "Stored-data start date",
+                    value=min_date if selected_is_fyers_index else max(min_date, max_date - timedelta(days=365)),
+                    min_value=min_date, max_value=max_date, key=f"price_chart_start_{selected_symbol.replace('^', '')}"
                 )
             with range_cols[1]:
                 chart_end = st.date_input(
                     "Stored-data end date", value=max_date,
-                    min_value=min_date, max_value=max_date, key="price_chart_end"
+                    min_value=min_date, max_value=max_date, key=f"price_chart_end_{selected_symbol.replace('^', '')}"
                 )
             view = chart_frame.loc[
                 (chart_frame["Date"].dt.date >= chart_start)
@@ -3159,6 +3246,39 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             elif view.empty:
                 st.warning("No candles exist inside this date range.")
             else:
+                if selected_is_fyers_index:
+                    candles = view.dropna(subset=["Open", "High", "Low", "Close"]).copy()
+                    if not candles.empty:
+                        native_fig = go.Figure(data=[go.Candlestick(
+                            x=candles["Date"],
+                            open=pd.to_numeric(candles["Open"], errors="coerce"),
+                            high=pd.to_numeric(candles["High"], errors="coerce"),
+                            low=pd.to_numeric(candles["Low"], errors="coerce"),
+                            close=pd.to_numeric(candles["Close"], errors="coerce"),
+                            increasing_line_color="#20d878",
+                            decreasing_line_color="#ff667a",
+                            name=index_history_data.TICKER_TO_INDEX_NAME.get(selected_symbol, selected_symbol),
+                        )])
+                        native_fig.update_layout(
+                            template="plotly_dark",
+                            paper_bgcolor="#050806",
+                            plot_bgcolor="#050806",
+                            font={"color": "#eaf6ed"},
+                            height=560,
+                            margin={"l": 12, "r": 12, "t": 34, "b": 12},
+                            xaxis_title="Date",
+                            yaxis_title="Index level",
+                            hovermode="x unified",
+                            xaxis={"rangeslider": {"visible": True}, "gridcolor": "#1c3325"},
+                            yaxis={"gridcolor": "#1c3325", "fixedrange": False},
+                        )
+                        st.plotly_chart(
+                            native_fig,
+                            use_container_width=True,
+                            config={"scrollZoom": True, "displaylogo": False},
+                        )
+                    else:
+                        st.warning("No valid OHLC candles are available to draw the index chart.")
                 close = pd.to_numeric(view["Chart Close"], errors="coerce").dropna()
                 first_close = float(close.iloc[0]) if not close.empty else float("nan")
                 last_close = float(close.iloc[-1]) if not close.empty else float("nan")
