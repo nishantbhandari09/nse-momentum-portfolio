@@ -3537,7 +3537,8 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
             st.caption(
                 f'Archive manifest generated: {archive_status.get("generated_at") or "unknown"}. '
                 f'Symbol count: {archive_status.get("total_symbols") or "unknown"}. '
-                "NSE archive prices are adjusted-price proxies and may not include cash dividends."
+                "The archive stores split/bonus-adjusted daily OHLC and close, plus volume, turnover and trade counts; "
+                "cash dividends are not included in the adjusted prices."
             )
         else:
             st.warning(
