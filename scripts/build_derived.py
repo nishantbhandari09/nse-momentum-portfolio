@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build compact, adjusted yearly NSE price panels for release download by Streamlit.
+"""Build compact, adjusted yearly NSE OHLCV panels for release download by Streamlit.
 
 Input: nse_data/yearly/nse_prices_adj_YYYY.parquet (built by download_nse_history.py).
-Output: nse_data/derived/prices_adj_YYYY.parquet, symbols.parquet, manifest.json.
+Output: nse_data/derived/prices_adj_YYYY.parquet with adjusted OHLC, adjusted close,
+raw volume, turnover and trade counts, plus symbols.parquet and manifest.json.
+The archive is stored as Release assets and downloaded by the app on demand.
 """
 from __future__ import annotations
 
@@ -106,24 +108,48 @@ def main() -> int:
         year = source_path.stem.rsplit("_", 1)[-1]
         frame = pd.read_parquet(
             source_path,
-            columns=["date", "symbol", "series", "isin", "adj_close", "value"],
+            columns=[
+                "date", "symbol", "series", "isin", "adj_open", "adj_high",
+                "adj_low", "adj_close", "open", "high", "low", "close",
+                "volume", "value", "trades",
+            ],
         )
         frame = _normalise_dates(frame)
         frame["symbol"] = frame["symbol"].astype("string").str.strip().str.upper()
         frame["series"] = frame["series"].astype("string").str.strip().str.upper()
         frame = frame[frame["series"].isin(EQUITY_SERIES)].copy()
-        frame["adj_close"] = pd.to_numeric(frame["adj_close"], errors="coerce")
-        frame["turnover"] = pd.to_numeric(frame["value"], errors="coerce")
+
+        # Store compact, split/bonus-adjusted OHLC along with close prices,
+        # raw traded volume, turnover and trade counts. This lets scans and
+        # in-app charts reuse one all-NSE archive rather than one CSV per stock.
+        for adjusted_col, raw_col in (
+            ("adj_open", "open"), ("adj_high", "high"),
+            ("adj_low", "low"), ("adj_close", "close"),
+        ):
+            if adjusted_col not in frame.columns:
+                frame[adjusted_col] = pd.to_numeric(frame.get(raw_col), errors="coerce")
+            else:
+                frame[adjusted_col] = pd.to_numeric(frame[adjusted_col], errors="coerce")
+        for column in ("volume", "value", "trades"):
+            if column not in frame.columns:
+                frame[column] = float("nan")
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["turnover"] = frame["value"]
         frame = frame.dropna(subset=["date", "symbol", "adj_close"])
         frame = frame[frame["adj_close"] > 0]
         if frame.empty:
             continue
         frame["sid"] = frame["symbol"].astype(str).map(aliases).fillna(frame["symbol"].astype(str))
         frame = frame.sort_values(["date", "turnover"]).drop_duplicates(["date", "sid"], keep="last")
-        compact = frame[["date", "sid", "adj_close", "turnover"]].copy()
+        compact = frame[[
+            "date", "sid", "adj_open", "adj_high", "adj_low", "adj_close",
+            "volume", "turnover", "trades",
+        ]].copy()
         compact["sid"] = compact["sid"].astype("string")
-        compact["adj_close"] = compact["adj_close"].astype("float32")
-        compact["turnover"] = compact["turnover"].astype("float64")
+        for column in ("adj_open", "adj_high", "adj_low", "adj_close"):
+            compact[column] = compact[column].astype("float32")
+        for column in ("volume", "turnover", "trades"):
+            compact[column] = compact[column].astype("float64")
         compact = compact.sort_values(["date", "sid"]).reset_index(drop=True)
         out_path = OUT / f"prices_adj_{year}.parquet"
         compact.to_parquet(out_path, index=False, compression="zstd", row_group_size=250_000)

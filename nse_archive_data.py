@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import pyarrow.parquet as pq
 import requests
 
 ROOT = Path(__file__).resolve().parent
@@ -137,6 +138,46 @@ def get_archive_status(refresh: bool = False) -> dict:
         }
 
 
+def list_all_symbols() -> list[str]:
+    """Return one canonical .NS ticker per security ID in the all-NSE archive.
+
+    The source contains historical as well as current securities. When an ISIN
+    changed ticker over time, the latest symbol is chosen so the archive's SID
+    alias mapping can still recover that security's older price history.
+    """
+    manifest = get_manifest()
+    symbols_path = ensure_asset(
+        str(manifest.get("symbols_asset", "symbols.parquet")),
+        manifest.get("symbols_sha256"),
+    )
+    try:
+        frame = pd.read_parquet(symbols_path)
+    except Exception as exc:
+        raise RuntimeError(f"Could not read the NSE archive symbol index: {exc}") from exc
+    required = {"symbol", "sid"}
+    if not required.issubset(frame.columns):
+        raise RuntimeError("The NSE archive symbol index is missing symbol or sid columns.")
+    frame = frame.copy()
+    frame["symbol"] = frame["symbol"].astype("string").str.strip().str.upper()
+    frame["sid"] = frame["sid"].astype("string").str.strip().str.upper()
+    frame = frame.dropna(subset=["symbol", "sid"])
+    frame = frame[
+        frame["symbol"].ne("")
+        & frame["sid"].ne("")
+        & ~frame["symbol"].isin(["NAN", "NONE", "N/A"])
+    ]
+    if frame.empty:
+        return []
+    if "last_date" in frame.columns:
+        frame["last_date"] = pd.to_datetime(frame["last_date"], errors="coerce")
+        frame = frame.sort_values(["last_date", "symbol"])
+    # One label per underlying SID prevents old and new ticker aliases from
+    # creating duplicate positions in a broad-universe backtest.
+    frame = frame.drop_duplicates("sid", keep="last")
+    symbols = frame["symbol"].drop_duplicates().tolist()
+    return sorted(f"{symbol}.NS" for symbol in symbols if symbol and symbol != "NAN")
+
+
 def _normalise_ticker(ticker: str) -> str:
     value = str(ticker).strip().upper()
     if value.endswith(".NS"):
@@ -233,6 +274,98 @@ def load_close_prices(tickers: Iterable[str], start, end) -> pd.DataFrame:
     result.index = pd.to_datetime(result.index, errors="coerce").tz_localize(None).normalize()
     result.index.name = "Date"
     return result.loc[(result.index >= start_ts) & (result.index <= end_ts)].sort_index()
+
+
+def load_ohlcv(ticker: str, start=None, end=None) -> pd.DataFrame:
+    """Load split/bonus-adjusted OHLC and raw volume/trades from the NSE release archive.
+
+    The compact yearly assets are downloaded on demand and integrity-checked.
+    Start defaults to five years before today, keeping per-symbol chart loads bounded.
+    Legacy compact assets containing only adjusted closes remain usable.
+    """
+    value = str(ticker).strip().upper()
+    output_columns = [
+        "Date", "Symbol", "Open", "High", "Low", "Close", "Volume",
+        "Traded Value", "Trades",
+    ]
+    if not value or value.startswith("^"):
+        return pd.DataFrame(columns=output_columns)
+    symbol = _normalise_ticker(value)
+    manifest = get_manifest()
+    symbols_path = ensure_asset(
+        str(manifest.get("symbols_asset", "symbols.parquet")),
+        manifest.get("symbols_sha256"),
+    )
+    aliases = pd.read_parquet(symbols_path, columns=["symbol", "sid"])
+    aliases["symbol"] = aliases["symbol"].astype("string").str.strip().str.upper()
+    aliases["sid"] = aliases["sid"].astype("string").str.strip().str.upper()
+    alias_map = dict(zip(aliases["symbol"], aliases["sid"]))
+    sid = alias_map.get(symbol, symbol)
+    end_ts = pd.Timestamp(end).normalize() if end is not None else pd.Timestamp.today().normalize()
+    start_ts = pd.Timestamp(start).normalize() if start is not None else end_ts - pd.DateOffset(years=5)
+    if end_ts < start_ts:
+        raise ValueError("End date must be on or after start date.")
+    rows = []
+    years = manifest.get("years", {})
+    compact_columns = [
+        "date", "sid", "adj_open", "adj_high", "adj_low", "adj_close",
+        "volume", "turnover", "trades",
+    ]
+    for year in range(start_ts.year, end_ts.year + 1):
+        info = years.get(str(year))
+        if not info:
+            continue
+        path = ensure_asset(
+            str(info.get("asset", f"prices_adj_{year}.parquet")),
+            info.get("sha256"),
+        )
+        try:
+            available = set(pq.ParquetFile(path).schema.names)
+            columns = [column for column in compact_columns if column in available]
+            if "date" not in columns or "sid" not in columns:
+                continue
+            frame = pd.read_parquet(
+                path,
+                columns=columns,
+                filters=[
+                    ("date", ">=", start_ts.to_pydatetime()),
+                    ("date", "<=", end_ts.to_pydatetime()),
+                    ("sid", "==", sid),
+                ],
+            )
+        except Exception:
+            try:
+                frame = pd.read_parquet(path)
+                if "sid" not in frame.columns or "date" not in frame.columns:
+                    continue
+                frame = frame.loc[
+                    frame["sid"].astype(str).str.upper().eq(str(sid).upper())
+                ].copy()
+            except Exception:
+                continue
+        if not frame.empty:
+            rows.append(frame)
+    if not rows:
+        return pd.DataFrame(columns=output_columns)
+    frame = pd.concat(rows, ignore_index=True)
+    frame["Date"] = pd.to_datetime(frame["date"], errors="coerce", utc=True).dt.tz_localize(None).dt.normalize()
+    frame["Symbol"] = value[:-3] if value.endswith(".NS") else value
+    for source, target in [
+        ("adj_open", "Open"), ("adj_high", "High"), ("adj_low", "Low"),
+        ("adj_close", "Close"), ("volume", "Volume"),
+        ("turnover", "Traded Value"), ("trades", "Trades"),
+    ]:
+        if source in frame:
+            frame[target] = pd.to_numeric(frame[source], errors="coerce")
+        else:
+            frame[target] = float("nan")
+    frame = frame.dropna(subset=["Date", "Close"])
+    return (
+        frame.loc[frame["Date"].between(start_ts, end_ts), output_columns]
+        .sort_values("Date")
+        .drop_duplicates("Date", keep="last")
+        .reset_index(drop=True)
+    )
 
 
 def merge_price_panels(primary: pd.DataFrame | None, fallback: pd.DataFrame | None) -> pd.DataFrame:

@@ -926,6 +926,14 @@ elif st.session_state.navigation_tab == "BACKTEST":
 
 # app (1).py mirrors the same logic as app.py for the duplicate deployment copy.
 
+## All-NSE historical data and strategy universe
+
+The permanent `nse-data` GitHub Release stores yearly NSE daily history from 1994 onward and is refreshed by the scheduled **Update all-stock NSE historical archive** workflow. The Streamlit app downloads only the years required for a scan, chart or backtest rather than checking every stock's CSV into the source repository.
+
+The compact archive contains split/bonus-adjusted OHLC prices plus daily volume, turnover and trade counts. The price adjustment is not a total-return series: cash dividends are not included. The new **All NSE Stocks (current + historical)** strategy universe resolves one canonical symbol per security ID, including securities that later delisted, so the historical scan/backtest universe is not restricted to today's Nifty 500 constituents. It is not a certified daily point-in-time NSE listing ledger, and securities with short or irregular trading histories still need data-quality review.
+
+All-NSE research uses the compact archive as the efficient price source; core FYERS index/defensive benchmark series continue to be loaded separately. A backtest uses only the requested date range plus warm-up history even though older archive years remain available.
+
 ## Data health, trading costs and EOD alerts
 
 The **Data & EOD** page adds a structural audit of saved FYERS stock/ETF candles, the index-inception coverage audit, and a status view of the NSE historical archive. Structural checks flag duplicate dates, invalid OHLC rows, stale files, gaps longer than seven calendar days, and close moves over 25%; flags require review and do not themselves establish that a price is wrong.

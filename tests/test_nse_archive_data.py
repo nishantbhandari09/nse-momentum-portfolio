@@ -91,5 +91,74 @@ class NSEArchivePanelTests(unittest.TestCase):
             self.assertNotIn("^NSEI", prices.columns)
 
 
+
+    def test_list_all_symbols_returns_one_latest_ticker_per_security_id(self):
+        with TemporaryDirectory() as temp:
+            symbols_path = Path(temp) / "symbols.parquet"
+            pd.DataFrame({
+                "symbol": ["OLDCO", "NEWCO", "RELIANCE"],
+                "sid": ["ISIN1", "ISIN1", "ISIN2"],
+                "first_date": ["2010-01-01", "2020-01-01", "2005-01-01"],
+                "last_date": ["2019-12-31", "2025-01-01", "2025-01-01"],
+            }).to_parquet(symbols_path, index=False)
+            manifest = {
+                "symbols_asset": "symbols.parquet",
+                "symbols_sha256": "symbols-hash",
+                "years": {},
+            }
+            with patch.object(nse_archive_data, "get_manifest", return_value=manifest):
+                with patch.object(nse_archive_data, "ensure_asset", return_value=symbols_path):
+                    tickers = nse_archive_data.list_all_symbols()
+            self.assertEqual(tickers, ["NEWCO.NS", "RELIANCE.NS"])
+            self.assertEqual(len(tickers), len(set(tickers)))
+
+    def test_load_ohlcv_reads_adjusted_bars_and_volume_from_archive(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            symbols_path = root / "symbols.parquet"
+            year_path = root / "prices_adj_2024.parquet"
+            pd.DataFrame({
+                "symbol": ["RELIANCE"],
+                "sid": ["RELIANCE"],
+            }).to_parquet(symbols_path, index=False)
+            pd.DataFrame({
+                "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                "sid": ["RELIANCE", "RELIANCE"],
+                "adj_open": [100.0, 103.0],
+                "adj_high": [110.0, 112.0],
+                "adj_low": [98.0, 102.0],
+                "adj_close": [105.0, 108.0],
+                "volume": [1000.0, 1500.0],
+                "turnover": [105000.0, 162000.0],
+                "trades": [250.0, 300.0],
+            }).to_parquet(year_path, index=False)
+            manifest = {
+                "symbols_asset": "symbols.parquet",
+                "symbols_sha256": "symbols-hash",
+                "years": {
+                    "2024": {
+                        "asset": "prices_adj_2024.parquet",
+                        "sha256": "year-hash",
+                    }
+                },
+            }
+
+            def fake_asset(filename, expected_sha256=None):
+                return symbols_path if filename == "symbols.parquet" else year_path
+
+            with patch.object(nse_archive_data, "get_manifest", return_value=manifest):
+                with patch.object(nse_archive_data, "ensure_asset", side_effect=fake_asset):
+                    frame = nse_archive_data.load_ohlcv(
+                        "RELIANCE.NS", "2024-01-01", "2024-01-31"
+                    )
+            self.assertEqual(len(frame), 2)
+            self.assertEqual(
+                frame.columns.tolist(),
+                ["Date", "Symbol", "Open", "High", "Low", "Close", "Volume", "Traded Value", "Trades"],
+            )
+            self.assertEqual(frame.iloc[0]["Close"], 105.0)
+            self.assertEqual(frame.iloc[1]["Volume"], 1500.0)
+            self.assertEqual(frame.iloc[0]["Symbol"], "RELIANCE")
+
 if __name__ == "__main__":
     unittest.main()
