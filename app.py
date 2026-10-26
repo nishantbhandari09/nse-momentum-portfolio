@@ -1122,17 +1122,17 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         # liquidated at the backtest rebalance if the exit rule is enabled.
         if strat.get("market_trend_exit_on_bearish", True):
             current_holdings = []
-        return []
+        return _scan_exit([], "market trend filter", "The market-trend filter is bearish or its selected index does not have enough valid history. If you expect bullish signals, inspect the benchmark history or temporarily disable this optional filter.")
 
     if use_relative_momentum:
         if relative_index_ticker not in prices_df.columns:
             # Fail closed: don't silently admit stocks if benchmark history is missing.
-            return []
+            return _scan_exit([], "relative momentum benchmark", f"Relative momentum needs {relative_index_ticker}, but its price history is missing.")
         benchmark = prices_df[relative_index_ticker].dropna()
         if as_of_date is not None:
             benchmark = benchmark.loc[:pd.Timestamp(as_of_date)]
         if benchmark.empty:
-            return []
+            return _scan_exit([], "relative momentum benchmark", f"No candles are available for benchmark {relative_index_ticker}.")
 
         # Restrict the numerator to the configured main group. In point-in-time
         # stock backtests, retain the historical archive names and let the
@@ -1173,8 +1173,9 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         current_rs_average = rs_average.iloc[-1]
         passes_rs = (current_rs > current_rs_average) & current_rs.notna() & current_rs_average.notna()
         filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in passes_rs.index and bool(passes_rs.get(c, False))]]
+        filter_counts["relative momentum"] = int(len(filtered_df.columns))
         if filtered_df.empty:
-            return []
+            return _scan_exit([], "relative momentum filter", "No stocks passed the relative-momentum moving-average filter.")
 
     ma_config = strat.get("moving_average", "200 EMA")
     if ma_config != "None":
@@ -1185,16 +1186,19 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         else:
             ma_vals = prices_df.rolling(window=period).mean().iloc[-1]
         filtered_df = filtered_df.loc[:, latest_prices > ma_vals]
+    filter_counts["moving average"] = int(len(filtered_df.columns))
 
     pct_high = strat.get("pct_from_high", 15.0)
     if pct_high > 0 and len(filtered_df) >= 252:
         period_high = filtered_df.iloc[-252:].max()
         pct_diff = ((period_high - latest_prices) / period_high) * 100
         filtered_df = filtered_df.loc[:, pct_diff <= pct_high]
+    filter_counts["distance from 52-week high"] = int(len(filtered_df.columns))
 
     min_price = strat.get("min_price", 0.0)
     if min_price > 0:
         filtered_df = filtered_df.loc[:, latest_prices >= min_price]
+    filter_counts["minimum price"] = int(len(filtered_df.columns))
 
     if as_of_date is not None and membership_calendar is not None and not membership_calendar.empty:
         selected_etf_tickers = get_selected_etf_tickers(selected_groups)
@@ -1217,6 +1221,7 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
             )
         ]
         filtered_df = filtered_df[eligible_cols]
+    filter_counts["index membership / eligibility"] = int(len(filtered_df.columns))
 
     if strat.get("use_rs", True):
         rs_benchmark = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
@@ -1229,7 +1234,8 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
 
         # A missing/stale benchmark must not silently disable the regime rule.
         if rs_index_ticker not in prices_df.columns or rs_defensive_ticker not in prices_df.columns:
-            return []
+            missing = [t for t in (rs_index_ticker, rs_defensive_ticker) if t not in prices_df.columns or prices_df[t].dropna().empty]
+            return _scan_exit([], "relative strength benchmark", "Required RS benchmark candles are missing: " + ", ".join(missing) + ". Reconnect FYERS and rerun the scan.")
         rs_index = prices_df[rs_index_ticker].dropna()
         rs_defensive = prices_df[rs_defensive_ticker].dropna()
         if as_of_date is not None:
@@ -1239,9 +1245,10 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         rs_ratio = rs_index.div(rs_defensive.replace(0, np.nan)).dropna()
         rs_sma = rs_ratio.rolling(window=50, min_periods=50).mean()
         if rs_ratio.empty or pd.isna(rs_sma.iloc[-1]):
-            return []
+            return _scan_exit([], "relative strength history", f"The {rs_index_ticker} / {rs_defensive_ticker} ratio has fewer than 50 overlapping valid sessions.")
         if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
-            return [rs_defensive_ticker]
+            scan_notes.append(f"Relative-strength regime is below its 50-session average; {rs_defensive_ticker} is the configured defensive fallback.")
+            return _scan_exit([rs_defensive_ticker], "defensive regime", f"The strategy selected {rs_defensive_ticker} because the market-relative-strength ratio is below its 50-session average.")
 
     periods = [int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0]
     raw_weights = strat.get("period_weights", [0.5, 0.3, 0.2])
@@ -1281,12 +1288,12 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     # included in the composite score; missing periods cannot give it an
     # artificially low (better) weighted rank.
     if not rank_components:
-        return []
+        return _scan_exit([], "momentum ranking", "Not enough usable price history for any configured momentum lookback. Check the stock-history date range or use shorter lookbacks.")
 
     rank_frame = pd.concat(rank_components, axis=1)
     complete_rank_frame = rank_frame.dropna(axis=0, how="any")
     if complete_rank_frame.empty:
-        return []
+        return _scan_exit([], "momentum ranking", "No stocks have valid returns across all configured momentum lookbacks. Some symbols have missing or short histories.")
     active_weights = np.asarray(component_weights, dtype=float)
     active_weights = active_weights / active_weights.sum()
     composite_rank = (
@@ -1303,7 +1310,17 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     slots_needed = max(entry_n - len(retained), 0)
     new_entries = [s for s in ordinal_rank.index if s not in retained][:slots_needed]
 
-    return retained + new_entries
+    result = retained + new_entries
+    if isinstance(diagnostics, dict):
+        diagnostics.update({
+            "stage": "complete",
+            "reason": f"Ranked {len(composite_rank):,} eligible symbols and selected {len(result):,} target(s).",
+            "rankable_symbols": int(len(composite_rank)),
+            "selected_targets": int(len(result)),
+            "filter_counts": dict(filter_counts),
+            "notes": list(scan_notes),
+        })
+    return result
 
 
 def run_backtest_simulation(strat_config, initial_capital, start_date, end_date, use_point_in_time=True, trading_cost_config=None):
