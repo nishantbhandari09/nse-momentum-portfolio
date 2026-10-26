@@ -690,8 +690,8 @@ def render_fyers_connection_panel():
 
 
 def get_live_prices(yf_tickers):
-    yf_tickers = [t for t in dict.fromkeys(yf_tickers) if t and not t.startswith("^")]
-    if not yf_tickers:
+    requested_tickers = [str(t).strip() for t in dict.fromkeys(yf_tickers) if str(t).strip()]
+    if not requested_tickers:
         return {}
     try:
         fyers = get_fyers_client()
@@ -699,7 +699,23 @@ def get_live_prices(yf_tickers):
         st.session_state["_fyers_status"] = "not connected in this session"
         return {}
 
-    fyers_symbols = {t: "NSE:" + t.replace(".NS", "") + "-EQ" for t in yf_tickers}
+    # Core Nifty indices use FYERS' index instruments; stocks/ETFs use their
+    # NSE cash-market symbol. Keep the app ticker as the lookup key.
+    fyers_symbols = {}
+    index_aliases = getattr(fyers_chart_data, "INDEX_FYERS_SYMBOLS", {})
+    for ticker in requested_tickers:
+        if ticker.startswith("^"):
+            symbol = index_aliases.get(ticker)
+            if symbol:
+                fyers_symbols[ticker] = symbol
+            continue
+        base = ticker[:-3] if ticker.upper().endswith(".NS") else ticker
+        base = base.strip().upper()
+        if base and not base.startswith("^"):
+            fyers_symbols[ticker] = "NSE:" + base + "-EQ"
+    if not fyers_symbols:
+        st.session_state["_fyers_status"] = "no supported symbols to quote"
+        return {}
     by_symbol = {}
     failures = []
     # FYERS Standard allows up to 50 symbols per Quotes request. Batching also
@@ -1007,6 +1023,78 @@ def _ensure_scan_index_history(ticker, min_bars=220):
         return f"Could not refresh benchmark {ticker} from FYERS ({type(exc).__name__}): {exc}"
 
 
+def _normalise_scan_ticker(value):
+    """Normalize common NSE/FYERS/Yahoo labels to the app's canonical ticker."""
+    ticker = str(value or "").strip().upper()
+    if not ticker:
+        return ""
+    if ticker.startswith("^"):
+        return ticker
+    reverse_index = {
+        str(fyers_symbol).strip().upper(): app_ticker
+        for app_ticker, fyers_symbol in getattr(fyers_chart_data, "INDEX_FYERS_SYMBOLS", {}).items()
+    }
+    if ticker in reverse_index:
+        return reverse_index[ticker]
+    if ticker.startswith("NSE:") or ticker.startswith("BSE:"):
+        ticker = ticker.split(":", 1)[1]
+    for suffix in (".NS", ".BO"):
+        if ticker.endswith(suffix):
+            ticker = ticker[:-len(suffix)]
+            break
+    for suffix in ("-EQ", "-BE", "-SM"):
+        if ticker.endswith(suffix):
+            ticker = ticker[:-len(suffix)]
+            break
+    if ticker.endswith("-INDEX"):
+        return reverse_index.get("NSE:" + ticker, "^" + ticker[:-6])
+    return f"{ticker}.NS" if ticker else ""
+
+
+def _normalise_scan_price_panel(price_panel):
+    """Canonicalize matrix columns and merge aliases without losing valid prices."""
+    if price_panel is None or price_panel.empty:
+        return pd.DataFrame() if price_panel is None else price_panel
+    result = {}
+    for original in price_panel.columns:
+        canonical = _normalise_scan_ticker(original)
+        if not canonical:
+            continue
+        series = pd.to_numeric(price_panel[original], errors="coerce")
+        if isinstance(series, pd.DataFrame):
+            series = series.iloc[:, 0]
+        if canonical in result:
+            result[canonical] = result[canonical].combine_first(series)
+        else:
+            result[canonical] = series.copy()
+    panel = pd.DataFrame(result, index=price_panel.index)
+    panel.index = pd.to_datetime(panel.index, errors="coerce").tz_localize(None).normalize()
+    panel = panel.loc[~panel.index.isna()].sort_index()
+    return panel.loc[:, ~panel.columns.duplicated()]
+
+
+def _overlay_live_quotes_on_scan_panel(price_panel, quotes):
+    """Replace the latest observation with live FYERS LTPs without inventing dates."""
+    if price_panel is None or price_panel.empty or not quotes:
+        return price_panel, 0
+    panel = price_panel.copy()
+    last_date = panel.index.max()
+    applied = 0
+    for raw_ticker, raw_price in quotes.items():
+        ticker = _normalise_scan_ticker(raw_ticker)
+        try:
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if not ticker or not np.isfinite(price) or price <= 0:
+            continue
+        if ticker not in panel.columns:
+            panel[ticker] = np.nan
+        panel.loc[last_date, ticker] = price
+        applied += 1
+    return panel.sort_index(), applied
+
+
 def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None, diagnostics=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
     scan_notes = []
@@ -1023,7 +1111,9 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
                 "reason": reason,
                 "groups": list(selected_groups),
                 "universe_tickers": int(len(group_tickers)),
-                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)),
+                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns and prices_df[t].notna().any())),
+                "live_quotes_applied": int(live_quote_count),
+                "fyers_connection_status": str(st.session_state.get("_fyers_status", "unknown")),
                 "price_rows": int(len(prices_df)),
                 "price_columns": int(len(prices_df.columns)),
                 "first_price_date": str(prices_df.index.min().date()) if not prices_df.empty else None,
@@ -1041,8 +1131,19 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     relative_index_name = strat.get("relative_momentum_index", "Nifty 50")
     relative_index_ticker = MAJOR_MARKET_INDICES.get(relative_index_name, "^NSEI")
 
+    live_quote_count = 0
     if price_subset is None:
-        group_tickers = get_trusted_tickers_by_group(selected_groups)
+        # Constituents and historical panels are cached for performance. A manual
+        # scan must re-read the latest group data instead of reusing an old empty panel.
+        try:
+            get_trusted_tickers_by_group.clear()
+            fetch_market_data.clear()
+        except Exception:
+            pass
+        group_tickers = list(dict.fromkeys(
+            _normalise_scan_ticker(t) for t in get_trusted_tickers_by_group(selected_groups)
+            if _normalise_scan_ticker(t)
+        ))
         fetch_tickers = list(group_tickers)
         if strat.get("use_rs", True):
             rs_benchmark_name = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
@@ -1060,10 +1161,28 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
                 scan_notes.append(note)
         if use_relative_momentum and relative_index_ticker not in fetch_tickers:
             fetch_tickers.append(relative_index_ticker)
+        # Cached historical closes provide momentum lookbacks; the live FYERS
+        # quote is applied to the latest row before moving-average/high filters
+        # and ranking, rather than only being shown after targets were selected.
         prices_df = fetch_market_data(fetch_tickers, period="2y")
+        prices_df = _normalise_scan_price_panel(prices_df)
+        quote_tickers = list(dict.fromkeys(
+            group_tickers + required_index_tickers + [GSEC_REGIME_TICKER]
+        ))
+        live_quotes = get_live_prices(quote_tickers)
+        prices_df, live_quote_count = _overlay_live_quotes_on_scan_panel(prices_df, live_quotes)
+        if not live_quotes:
+            scan_notes.append(
+                "No live FYERS quotes were returned; the scan is using saved/archived closes. "
+                "Reconnect FYERS to ensure this scan is refreshed with current quotes."
+            )
+        else:
+            scan_notes.append(
+                f"FYERS live quotes applied to {live_quote_count:,} of {len(quote_tickers):,} requested stock/index/defensive symbols."
+            )
         candidate_tickers = set(group_tickers)
     else:
-        prices_df = price_subset.copy()
+        prices_df = _normalise_scan_price_panel(price_subset.copy())
         candidate_tickers = None
 
     if prices_df is None or prices_df.empty:
@@ -1079,7 +1198,9 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         diagnostics.update({
             "groups": list(selected_groups),
             "universe_tickers": int(len(group_tickers)) if candidate_tickers is not None else int(len(prices_df.columns)),
-            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns and prices_df[t].notna().any())) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "live_quotes_applied": int(live_quote_count),
+            "fyers_connection_status": str(st.session_state.get("_fyers_status", "unknown")),
             "price_rows": int(len(prices_df)),
             "price_columns": int(len(prices_df.columns)),
             "first_price_date": str(prices_df.index.min().date()),
@@ -1112,7 +1233,25 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
             c for c in filtered_df.columns if c in selected_assets
         ]]
 
-    filter_counts["selected universe with prices"] = int(len(filtered_df.columns))
+    # Quote-only symbols are useful for displaying current prices but cannot be momentum-ranked
+    # without sufficient historic closes. Keep them in diagnostics, not as fake history.
+    historical_counts = {
+        ticker: int(prices_df[ticker].dropna().shape[0])
+        for ticker in group_tickers if ticker in prices_df.columns
+    } if candidate_tickers is not None else {}
+    eligible_history = {
+        ticker for ticker, count in historical_counts.items()
+        if count >= max(60, max([int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0] or [60]) + 1)
+    }
+    if candidate_tickers is not None and eligible_history:
+        filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in eligible_history]]
+    if isinstance(diagnostics, dict):
+        diagnostics["symbols_with_sufficient_history"] = len(eligible_history) if candidate_tickers is not None else int(filtered_df.shape[1])
+        diagnostics["symbols_missing_history"] = [
+            ticker for ticker, count in historical_counts.items()
+            if count < max(60, max([int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0] or [60]) + 1)
+        ][:25]
+    filter_counts["selected universe with prices and sufficient history"] = int(len(filtered_df.columns))
     if filtered_df.empty:
         return _scan_exit([], "universe selection", "No selected-universe symbols matched the downloaded price panel. The constituent list or ticker aliases may be the issue.")
 
