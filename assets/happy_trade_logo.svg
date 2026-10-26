@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 548 524" role="img" aria-label="The Happy Trade - Your Trading Friend">
+<rect width="548" height="524" rx="22" fill="#020403"/>
+<circle cx="274" cy="260" r="239" fill="none" stroke="#008b48" stroke-width="13"/>
+<path d="M160 95 C149 111 151 125 164 139 C183 159 209 175 235 185 C226 198 221 209 224 219 C232 219 239 214 246 205 C243 220 248 239 256 252 C265 262 283 264 292 254 C302 243 306 222 302 205 C311 215 320 220 328 219 C330 209 323 198 313 185 C341 174 367 158 386 139 C399 125 400 111 388 95 C393 119 379 131 357 143 C336 155 318 153 300 149 C283 145 266 145 249 149 C230 153 212 155 191 143 C169 131 155 119 160 95 Z" fill="#008b48"/>
+<path d="M258 250 C250 258 252 270 263 275 C270 279 278 279 285 275 C296 270 298 258 290 250 C280 254 268 254 258 250 Z" fill="#008b48"/>
+<text x="274" y="325" text-anchor="middle" fill="#fffef1" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="58">The Happy</text>
+<text x="274" y="389" text-anchor="middle" fill="#fffef1" font-family="Georgia, 'Times New Roman', serif" font-weight="bold" font-size="58">Trade</text>
+<text x="274" y="436" text-anchor="middle" fill="#d6d9d3" font-family="Arial, Helvetica, sans-serif" letter-spacing="4" font-size="19">Your Trading Friend</text>
+</svg>
