@@ -43,14 +43,194 @@ from etf_group_universe import (
 # ==========================================
 # PAGE CONFIGURATION & STYLING
 # ==========================================
-st.set_page_config(page_title="Quantitative Strategy Engine & Backtest Studio", layout="wide")
+st.set_page_config(
+    page_title="Happy Trade | Momentum Investing",
+    page_icon="📈",
+    layout="wide",
+)
 
 st.markdown("""
     <style>
-    .main { background-color: #F4F7FE; }
-    .stMetric { background-color: #FFFFFF; padding: 15px; border-radius: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .status-active { color: #00875A; font-weight: bold; background-color: #E3FCEF; padding: 2px 8px; border-radius: 4px; }
-    .status-paused { color: #DE350B; font-weight: bold; background-color: #FFEBE6; padding: 2px 8px; border-radius: 4px; }
+    :root {
+        --ht-green: #00a85a;
+        --ht-green-bright: #20d878;
+        --ht-green-deep: #08763f;
+        --ht-black: #050806;
+        --ht-panel: #0b120e;
+        --ht-panel-2: #101b14;
+        --ht-border: #1c3c2a;
+        --ht-text: #eff8f1;
+        --ht-muted: #a0b2a6;
+    }
+    html, body, [data-testid="stAppViewContainer"], .stApp {
+        background: var(--ht-black) !important;
+        color: var(--ht-text) !important;
+    }
+    [data-testid="stHeader"] {
+        background: rgba(5, 8, 6, 0.94) !important;
+    }
+    [data-testid="stMain"] .block-container {
+        padding-top: 1.15rem;
+        padding-bottom: 2.5rem;
+        max-width: 1680px;
+    }
+    h1, h2, h3, h4, h5, h6, p, label, [data-testid="stMarkdownContainer"] {
+        color: var(--ht-text);
+    }
+    h1, h2, h3 {
+        letter-spacing: -0.025em;
+    }
+    [data-testid="stCaptionContainer"], .stCaption, small {
+        color: var(--ht-muted) !important;
+    }
+    [data-testid="stMetric"] {
+        background: linear-gradient(145deg, #101b14, #0a100c);
+        border: 1px solid var(--ht-border);
+        padding: 17px 18px;
+        border-radius: 15px;
+        box-shadow: 0 5px 18px rgba(0, 0, 0, 0.18);
+    }
+    [data-testid="stMetricLabel"] {
+        color: #a8bdb0 !important;
+        font-size: 0.88rem !important;
+    }
+    [data-testid="stMetricValue"] {
+        color: #f1fff5 !important;
+        font-weight: 700;
+    }
+    [data-testid="stMetricDelta"] {
+        font-weight: 600;
+    }
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 10px;
+        min-height: 2.55rem;
+        font-weight: 650;
+        border: 1px solid #28553a;
+        transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+    }
+    .stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #07934d, #08763f);
+        color: #ffffff;
+        border: 1px solid #21c773;
+        box-shadow: 0 3px 12px rgba(0, 168, 90, 0.16);
+    }
+    .stButton > button[kind="secondary"], .stDownloadButton > button {
+        background: #101812;
+        color: #eaf6ed;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        border-color: var(--ht-green-bright);
+        color: #ffffff;
+        transform: translateY(-1px);
+    }
+    [data-baseweb="input"] > div, [data-baseweb="select"] > div,
+    [data-testid="stDateInput"] input, [data-testid="stNumberInput"] input,
+    [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea {
+        background: #0b120e !important;
+        color: #eff8f1 !important;
+        border-color: #2a4735 !important;
+        border-radius: 9px !important;
+    }
+    [data-baseweb="popover"], [data-baseweb="menu"], [role="listbox"] {
+        background: #101812 !important;
+    }
+    [data-baseweb="tab-list"] {
+        gap: 8px;
+        border-bottom-color: #203b2b;
+    }
+    [data-baseweb="tab"] {
+        color: #a8bdb0 !important;
+        border-radius: 9px 9px 0 0;
+        padding: 10px 15px;
+    }
+    [aria-selected="true"][data-baseweb="tab"] {
+        color: #52e995 !important;
+        border-bottom-color: var(--ht-green-bright) !important;
+    }
+    [data-testid="stDataFrame"], [data-testid="stTable"] {
+        border: 1px solid #1c3c2a;
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    [data-testid="stExpander"] {
+        background: #0b120e;
+        border: 1px solid #203b2b;
+        border-radius: 12px;
+    }
+    [data-testid="stAlert"] {
+        border-radius: 10px;
+        border-width: 1px;
+    }
+    hr {
+        border-color: #1c3325 !important;
+    }
+    .status-active {
+        color: #5cf2a0;
+        font-weight: 700;
+        background-color: #10291b;
+        border: 1px solid #1c6840;
+        padding: 3px 9px;
+        border-radius: 6px;
+    }
+    .status-paused {
+        color: #ffb9a8;
+        font-weight: 700;
+        background-color: #2a1713;
+        border: 1px solid #6b3023;
+        padding: 3px 9px;
+        border-radius: 6px;
+    }
+    .ht-brandbar {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 8px 0 17px 0;
+        margin-bottom: 8px;
+        border-bottom: 1px solid #1b3927;
+    }
+    .ht-brand-mark {
+        width: 82px;
+        height: 82px;
+        flex: 0 0 82px;
+        overflow: hidden;
+        border-radius: 14px;
+        border: 1px solid #1b5d38;
+        box-shadow: 0 5px 18px rgba(0, 168, 90, 0.12);
+    }
+    .ht-brand-mark svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+    .ht-brand-title {
+        color: #f2fff5;
+        font-size: clamp(1.6rem, 2.4vw, 2.35rem);
+        line-height: 1.08;
+        letter-spacing: -0.04em;
+        font-weight: 800;
+    }
+    .ht-brand-title span {
+        color: #20d878;
+    }
+    .ht-brand-subtitle {
+        color: #a0b2a6;
+        font-size: 0.94rem;
+        margin-top: 6px;
+    }
+    .ht-brand-eyebrow {
+        color: #45dc89;
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+        font-weight: 750;
+        margin-bottom: 6px;
+    }
+    @media (max-width: 760px) {
+        [data-testid="stMain"] .block-container { padding: 0.8rem 0.8rem 2rem; }
+        .ht-brandbar { gap: 12px; padding-bottom: 12px; }
+        .ht-brand-mark { width: 64px; height: 64px; flex-basis: 64px; }
+        .ht-brand-subtitle { font-size: 0.8rem; }
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -1771,6 +1951,29 @@ _maybe_send_rebalance_date_emails()
 # ==========================================
 # NAVIGATION HEADER
 # ==========================================
+try:
+    with open("assets/happy_trade_logo.svg", "r", encoding="utf-8") as _logo_file:
+        _happy_trade_logo_svg = _logo_file.read()
+    st.markdown(
+        f"""
+        <div class="ht-brandbar">
+            <div class="ht-brand-mark">{_happy_trade_logo_svg}</div>
+            <div>
+                <div class="ht-brand-eyebrow">Your trading friend</div>
+                <div class="ht-brand-title">Happy <span>Trade</span></div>
+                <div class="ht-brand-subtitle">Research smarter. Trade with a plan. Invest with discipline.</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+except (OSError, UnicodeDecodeError):
+    st.markdown(
+        '<div class="ht-brandbar"><div><div class="ht-brand-title">Happy <span>Trade</span></div>'
+        '<div class="ht-brand-subtitle">Research smarter. Trade with a plan. Invest with discipline.</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
 nav_col1, nav_col2, nav_col3, nav_col4, nav_col5, nav_col6 = st.columns([1.0, 1.45, 1.15, 1.25, 1.1, 1.25])
 with nav_col1:
     if st.button("💻 DASHBOARD", use_container_width=True, type="primary" if st.session_state.navigation_tab == "DASHBOARD" else "secondary"):
