@@ -1103,6 +1103,7 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     prices_df = pd.DataFrame()
     filtered_df = pd.DataFrame()
     required_index_tickers = []
+    historical_count_by_ticker = {}
 
     def _scan_exit(result, stage, reason):
         if isinstance(diagnostics, dict):
@@ -1111,8 +1112,14 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
                 "reason": reason,
                 "groups": list(selected_groups),
                 "universe_tickers": int(len(group_tickers)),
-                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns and prices_df[t].notna().any())),
+                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if historical_count_by_ticker.get(t, 0) > 0)),
                 "live_quotes_applied": int(live_quote_count),
+                "symbols_with_sufficient_history": int(sum(
+                    1 for t in group_tickers
+                    if historical_count_by_ticker.get(t, 0) >= max(
+                        60, max([int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0] or [60]) + 1
+                    )
+                )),
                 "fyers_connection_status": str(st.session_state.get("_fyers_status", "unknown")),
                 "price_rows": int(len(prices_df)),
                 "price_columns": int(len(prices_df.columns)),
@@ -1166,6 +1173,10 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         # and ranking, rather than only being shown after targets were selected.
         prices_df = fetch_market_data(fetch_tickers, period="2y")
         prices_df = _normalise_scan_price_panel(prices_df)
+        historical_count_by_ticker = {
+            ticker: int(prices_df[ticker].dropna().shape[0]) if ticker in prices_df.columns else 0
+            for ticker in group_tickers
+        }
         quote_tickers = list(dict.fromkeys(
             group_tickers + required_index_tickers + [GSEC_REGIME_TICKER]
         ))
@@ -1198,7 +1209,13 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         diagnostics.update({
             "groups": list(selected_groups),
             "universe_tickers": int(len(group_tickers)) if candidate_tickers is not None else int(len(prices_df.columns)),
-            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns and prices_df[t].notna().any())) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if historical_count_by_ticker.get(t, 0) > 0)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "symbols_with_sufficient_history": int(sum(
+                1 for t in group_tickers
+                if historical_count_by_ticker.get(t, 0) >= max(
+                    60, max([int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0] or [60]) + 1
+                )
+            )) if candidate_tickers is not None else int(len(prices_df.columns)),
             "live_quotes_applied": int(live_quote_count),
             "fyers_connection_status": str(st.session_state.get("_fyers_status", "unknown")),
             "price_rows": int(len(prices_df)),
