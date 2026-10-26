@@ -950,7 +950,64 @@ def _market_trend_is_bullish(strat, as_of_date=None):
         return False
 
 
-def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None):
+
+def _ensure_scan_index_history(ticker, min_bars=220):
+    """Refresh missing or stale supported index candles from the active FYERS session."""
+    ticker = str(ticker or "").strip()
+    if ticker not in fyers_chart_data.INDEX_FYERS_SYMBOLS:
+        return None
+
+    today = pd.Timestamp.now(tz="Asia/Kolkata").date()
+    try:
+        saved = index_history_data.load_index_ohlc(ticker)
+    except Exception:
+        saved = pd.DataFrame()
+    latest = pd.to_datetime(
+        saved.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce"
+    ).dropna()
+    stale = latest.empty or (pd.Timestamp(today) - latest.max().normalize()).days > 10
+    if not saved.empty and len(saved) >= int(min_bars) and not stale:
+        return None
+    if "fyers_access_token" not in st.session_state:
+        return (
+            f"Index history for {ticker} is missing or stale. Connect FYERS and rerun the scan "
+            "so Happy Trade can fetch its required benchmark candles."
+        )
+
+    try:
+        start_date = (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
+        index_name = index_history_data.TICKER_TO_INDEX_NAME.get(ticker)
+        if index_name:
+            spec_start = pd.Timestamp(index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"]).date()
+            start_date = max(start_date, spec_start)
+        fresh = fyers_chart_data.fetch_index_history(get_fyers_client(), ticker, start_date, today)
+        if fresh.empty:
+            return (
+                f"FYERS returned no candles for {ticker}; check the FYERS historical-data entitlement "
+                "and the mapped index symbol."
+            )
+
+        fields = ["Date", "Open", "High", "Low", "Close", "Volume"]
+        old = saved.reindex(columns=fields) if not saved.empty else pd.DataFrame(columns=fields)
+        fresh = fresh.reindex(columns=fields)
+        merged = pd.concat([old, fresh], ignore_index=True)
+        merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+        merged = merged.dropna(subset=["Date", "Close"]).sort_values("Date").drop_duplicates("Date", keep="last")
+        merged["Source"] = "FYERS API"
+        spec = index_history_data.INDEX_HISTORY_SPECS[index_name]
+        path = index_history_data.INDEX_PRICE_DIR / spec["filename"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(path, index=False, date_format="%Y-%m-%d", float_format="%.6f")
+        fetch_market_data.clear()
+        return (
+            f"Refreshed {index_name} from FYERS: {len(merged):,} daily candles, "
+            f"{merged['Date'].min().date()} to {merged['Date'].max().date()}."
+        )
+    except Exception as exc:
+        return f"Could not refresh benchmark {ticker} from FYERS ({type(exc).__name__}): {exc}"
+
+
+def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None, diagnostics=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
 
     use_relative_momentum = bool(strat.get("use_relative_momentum_filter", False))
