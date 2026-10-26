@@ -160,5 +160,39 @@ class NSEArchivePanelTests(unittest.TestCase):
             self.assertEqual(frame.iloc[1]["Volume"], 1500.0)
             self.assertEqual(frame.iloc[0]["Symbol"], "RELIANCE")
 
+
+    def test_prefetch_years_downloads_only_years_in_requested_range(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            assets = {}
+            years = {}
+            for year, size in ((2021, 10), (2022, 20), (2023, 30), (2024, 40)):
+                path = root / f"prices_adj_{year}.parquet"
+                path.write_bytes(b"x" * size)
+                assets[path.name] = path
+                years[str(year)] = {
+                    "asset": path.name,
+                    "sha256": f"hash-{year}",
+                    "rows": year,
+                }
+            manifest = {
+                "years": years,
+                "total_symbols": 1234,
+                "first_date": "1994-11-03",
+                "last_date": "2026-10-23",
+                "generated_at_utc": "2026-10-23T00:00:00Z",
+            }
+
+            def fake_asset(filename, expected_sha256=None):
+                return assets[filename]
+
+            with patch.object(nse_archive_data, "get_manifest", return_value=manifest):
+                with patch.object(nse_archive_data, "ensure_asset", side_effect=fake_asset):
+                    result = nse_archive_data.prefetch_years("2021-10-01", "2023-03-01")
+            self.assertEqual(result["years"], [2021, 2022, 2023])
+            self.assertEqual(result["years_cached"], 3)
+            self.assertEqual(result["bytes"], 60)
+            self.assertEqual(result["symbols"], 1234)
+
 if __name__ == "__main__":
     unittest.main()
