@@ -256,6 +256,12 @@ GSEC_REGIME_TICKER = "SETFGSEC.NS"
 # ==========================================
 # DATA FETCHING ENGINE
 # ==========================================
+@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+def get_all_nse_stock_tickers():
+    """Load the canonical all-NSE stock universe from the permanent archive."""
+    return nse_archive_data.list_all_symbols()
+
+
 @st.cache_data(ttl=86400)
 def get_trusted_tickers_by_group(groups):
     tickers = []
@@ -266,6 +272,15 @@ def get_trusted_tickers_by_group(groups):
     equity_indices = [
         name for name in ("Nifty 500", "Nifty 200") if name in groups
     ]
+    if "All NSE Stocks" in groups:
+        try:
+            tickers.extend(get_all_nse_stock_tickers())
+        except Exception as exc:
+            st.warning(
+                "Could not load the full NSE stock universe from the permanent archive. "
+                f"Check the NSE data archive workflow and retry. Detail: {exc}"
+            )
+
     for index_name in equity_indices:
         try:
             constituents, _source_url = fetch_index_constituents("Broad Market", index_name)
@@ -308,7 +323,7 @@ def get_trusted_tickers_by_group(groups):
         set(ASSET_GROUPS_MAPPING)
         | set(ETF_GROUP_SYMBOLS)
         | set(ETF_GROUP_ALIASES)
-        | {"Nifty 500", "Nifty 200"}
+        | {"Nifty 500", "Nifty 200", "All NSE Stocks"}
     )
     remaining_groups = [g for g in groups if g not in known_group_names]
     if remaining_groups:
@@ -319,7 +334,7 @@ def get_trusted_tickers_by_group(groups):
         except Exception:
             pass
 
-    if not tickers:
+    if not tickers and "All NSE Stocks" not in groups:
         tickers = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
 
     return list(set(tickers))
@@ -361,7 +376,18 @@ def fetch_market_data(tickers, period="5y", full_history=False, start_date=None,
         + ALWAYS_FETCH_OVERLAY_TICKERS
         + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
     ))
-    prices = fyers_history_data.load_close_prices(requested)
+    broad_nse_universe = len(ticker_values) > 1000
+    if broad_nse_universe:
+        # For an all-NSE backtest, the compact Release archive is the efficient
+        # stock-price source. Load only broker-only benchmarks/overlays from
+        # individual FYERS CSV files; otherwise thousands of per-symbol reads
+        # add latency without improving this archive-backed universe.
+        broker_only_symbols = list(dict.fromkeys(
+            ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER]
+        ))
+        prices = fyers_history_data.load_close_prices(broker_only_symbols)
+    else:
+        prices = fyers_history_data.load_close_prices(requested)
 
     # Always use the permanent NSE archive as a secondary source, not only for
     # explicit backtests. This lets scans, regime filters and portfolio valuation
@@ -1362,7 +1388,12 @@ def run_backtest_simulation(strat_config, initial_capital, start_date, end_date,
     audit_tickers = list(dict.fromkeys(
         tickers + ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER, "^NSEI"]
     ))
-    raw_prices = fyers_history_data.load_close_prices(audit_tickers)
+    if len(tickers) > 1000:
+        raw_prices = fyers_history_data.load_close_prices(list(dict.fromkeys(
+            ALWAYS_FETCH_OVERLAY_TICKERS + [NIFTY_REGIME_TICKER, GSEC_REGIME_TICKER, "^NSEI"]
+        )))
+    else:
+        raw_prices = fyers_history_data.load_close_prices(audit_tickers)
     if raw_prices is None:
         raw_prices = pd.DataFrame()
 
@@ -2476,6 +2507,15 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
     with grp_c1:
         grp_nifty500 = st.checkbox("Nifty 500 Universe", value=("Nifty 500" in existing_groups))
         grp_nifty200 = st.checkbox("Nifty 200 Universe", value=("Nifty 200" in existing_groups))
+        grp_all_nse_stocks = st.checkbox(
+            "All NSE Stocks (current + historical)",
+            value=("All NSE Stocks" in existing_groups),
+            help=(
+                "Uses the permanent NSE archive's full security universe, including securities that have since "
+                "been delisted. This broad universe is useful for research and reduces reliance on today's "
+                "Nifty 500 constituents. Some securities may have limited trading history."
+            ),
+        )
     with grp_c2:
         grp_all_etfs = st.checkbox("All ETFs Universe", value=("All ETFs" in existing_groups))
         grp_gold_etf = st.checkbox("Gold ETF Only", value=("Gold ETF" in existing_groups))
@@ -2697,6 +2737,7 @@ elif st.session_state.navigation_tab == "STRATEGY_BUILDER":
             selected_groups = []
             if grp_nifty500: selected_groups.append("Nifty 500")
             if grp_nifty200: selected_groups.append("Nifty 200")
+            if grp_all_nse_stocks: selected_groups.append("All NSE Stocks")
             if grp_all_etfs: selected_groups.append("All ETFs")
             if grp_gold_etf: selected_groups.append("Gold ETF")
             if grp_liquidbees: selected_groups.append("LiquidBEES")
@@ -2834,6 +2875,12 @@ elif st.session_state.navigation_tab == "BACKTEST":
         value=True,
         help="Historical eligibility is reconstructed from published index changes. This reduces survivorship bias but does not eliminate every data gap."
     )
+    if "All NSE Stocks" in bt_strat_config.get("groups", []):
+        st.caption(
+            "All NSE universe note: the data archive includes historical and currently traded NSE securities; "
+            "ticker/ISIN aliases are linked where possible. It is not a certified point-in-time NSE listing ledger, "
+            "and the split/bonus-adjusted prices do not include cash dividends."
+        )
     if use_pit and any(group in bt_strat_config.get("groups", []) for group in ("Nifty 500", "Nifty 200")):
         st.caption(
             "Data quality note: daily OHLC history for major Nifty indices is stored in this repository. "
@@ -3029,10 +3076,16 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
 
     fyers_symbols = fyers_history_data.load_all_symbols()
     nse_symbols = nse_history_data.list_symbols()
+    try:
+        archive_stock_symbols = get_all_nse_stock_tickers()
+    except Exception as exc:
+        archive_stock_symbols = []
+        st.warning(f"Full NSE stock chart list is temporarily unavailable: {exc}")
     index_symbols = list(index_history_data.TICKER_TO_INDEX_NAME.keys())
     tradingview_only_symbols = list(tv_charts.TRADINGVIEW_ONLY_INDEXES.keys())
     all_chart_symbols = list(dict.fromkeys(
-        index_symbols + tradingview_only_symbols + fyers_symbols + [f"{s}.NS" for s in nse_symbols]
+        index_symbols + tradingview_only_symbols + fyers_symbols
+        + [f"{s}.NS" for s in nse_symbols] + archive_stock_symbols
     ))
     if not all_chart_symbols:
         st.warning("No stored price history is available yet. Connect FYERS and confirm the history workflow completed.")
@@ -3104,6 +3157,16 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             nse_history_data.load_stock_ohlcv(stock_base, adjusted=True)
             if not is_index_symbol else pd.DataFrame()
         )
+        archive_ohlcv = pd.DataFrame()
+        if not is_index_symbol and nse_ohlcv.empty and selected_symbol.endswith(".NS"):
+            try:
+                archive_ohlcv = nse_archive_data.load_ohlcv(
+                    selected_symbol,
+                    start=(pd.Timestamp.now().normalize() - pd.DateOffset(years=5)).date(),
+                    end=pd.Timestamp.now().normalize().date(),
+                )
+            except Exception as exc:
+                st.info(f"Full NSE archive candles for this stock could not be loaded: {exc}")
         fyers_ohlcv = (
             fyers_history_data.load_ohlcv(selected_symbol)
             if not is_tradingview_only_index else pd.DataFrame()
@@ -3201,6 +3264,10 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
                 chart_frame["Chart Close"] = chart_frame["Adjusted Close"]
             else:
                 chart_frame["Chart Close"] = chart_frame["Close"]
+        elif not archive_ohlcv.empty:
+            chart_frame = archive_ohlcv.copy()
+            chart_frame["Chart Close"] = chart_frame["Close"]
+            chart_source = "Permanent all-NSE archive (split/bonus-adjusted OHLC; cash dividends not included)"
         elif not fyers_ohlcv.empty:
             chart_frame = fyers_ohlcv.copy()
             chart_frame["Chart Close"] = chart_frame["Close"]
