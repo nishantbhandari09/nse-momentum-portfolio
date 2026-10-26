@@ -3028,17 +3028,30 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
     fyers_symbols = fyers_history_data.load_all_symbols()
     nse_symbols = nse_history_data.list_symbols()
     index_symbols = list(index_history_data.TICKER_TO_INDEX_NAME.keys())
-    all_chart_symbols = list(dict.fromkeys(index_symbols + fyers_symbols + [f"{s}.NS" for s in nse_symbols]))
+    tradingview_only_symbols = list(tv_charts.TRADINGVIEW_ONLY_INDEXES.keys())
+    all_chart_symbols = list(dict.fromkeys(
+        index_symbols + tradingview_only_symbols + fyers_symbols + [f"{s}.NS" for s in nse_symbols]
+    ))
     if not all_chart_symbols:
         st.warning("No stored price history is available yet. Connect FYERS and confirm the history workflow completed.")
     else:
-        default_symbol = "^CRSLDX" if "^CRSLDX" in all_chart_symbols else all_chart_symbols[0]
+        # Open on the widely used Nifty 50 symbol; Nifty 500's TradingView alias
+        # previously pointed to a non-existent ticker, making the default chart look blank.
+        default_symbol = "^NSEI" if "^NSEI" in all_chart_symbols else all_chart_symbols[0]
+
+        def _format_price_chart_symbol(symbol):
+            if symbol in index_history_data.TICKER_TO_INDEX_NAME:
+                return f"{index_history_data.TICKER_TO_INDEX_NAME[symbol]} ({tv_charts.tv_symbol(symbol)})"
+            if symbol in tv_charts.TRADINGVIEW_ONLY_INDEXES:
+                info = tv_charts.TRADINGVIEW_ONLY_INDEXES[symbol]
+                return f"{info['label']} ({info['symbol']})"
+            return symbol.replace(".NS", "")
+
         selected_symbol = st.selectbox(
             "Select a stock or index",
             options=all_chart_symbols,
             index=all_chart_symbols.index(default_symbol),
-            format_func=lambda s: f"{index_history_data.TICKER_TO_INDEX_NAME.get(s, s.replace('.NS', ''))} ({s})"
-                if s.startswith("^") else s.replace(".NS", ""),
+            format_func=_format_price_chart_symbol,
             key="historical_chart_symbol",
         )
 
@@ -3058,9 +3071,10 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
         st.markdown("#### TradingView price chart")
         components.html(
             tv_charts.advanced_chart_html(
-                tv_charts.tv_symbol(selected_symbol),
+                selected_symbol,
                 interval=chart_interval_labels[selected_interval],
                 height=560,
+                theme="dark",
             ),
             height=590,
             scrolling=False,
@@ -3070,9 +3084,17 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             "stored FYERS/NSE data remains the source for scanning calculations, historical metrics, and backtests."
         )
 
+        is_tradingview_only_index = selected_symbol in tv_charts.TRADINGVIEW_ONLY_INDEXES
+        is_index_symbol = selected_symbol.startswith("^") or is_tradingview_only_index
         stock_base = selected_symbol[:-3] if selected_symbol.endswith(".NS") else selected_symbol
-        nse_ohlcv = nse_history_data.load_stock_ohlcv(stock_base, adjusted=True) if not selected_symbol.startswith("^") else pd.DataFrame()
-        fyers_ohlcv = fyers_history_data.load_ohlcv(selected_symbol)
+        nse_ohlcv = (
+            nse_history_data.load_stock_ohlcv(stock_base, adjusted=True)
+            if not is_index_symbol else pd.DataFrame()
+        )
+        fyers_ohlcv = (
+            fyers_history_data.load_ohlcv(selected_symbol)
+            if not is_tradingview_only_index else pd.DataFrame()
+        )
         if not nse_ohlcv.empty:
             chart_frame = nse_ohlcv.copy()
             chart_source = "NSE bhavcopy archive (split/bonus-adjusted proxy; no dividend adjustment)"
@@ -3090,8 +3112,9 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
 
         if chart_frame.empty:
             st.warning(
-                f"No stored FYERS/NSE candles were found for {selected_symbol}. "
-                "The TradingView chart above is independent; stored-data metrics and CSV export require local historical candles."
+                f"No verified local FYERS/NSE candles were found for {selected_symbol}. "
+                "The TradingView chart above is independent and should still load. Stored-data metrics and CSV export "
+                "require locally stored historical candles; legacy index CSVs without a FYERS source marker are not trusted."
             )
         else:
             chart_frame["Date"] = pd.to_datetime(chart_frame["Date"], errors="coerce")
