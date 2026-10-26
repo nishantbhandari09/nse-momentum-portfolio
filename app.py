@@ -1243,7 +1243,7 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         ticker for ticker, count in historical_counts.items()
         if count >= max(60, max([int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0] or [60]) + 1)
     }
-    if candidate_tickers is not None and eligible_history:
+    if candidate_tickers is not None:
         filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in eligible_history]]
     if isinstance(diagnostics, dict):
         diagnostics["symbols_with_sufficient_history"] = len(eligible_history) if candidate_tickers is not None else int(filtered_df.shape[1])
@@ -1253,7 +1253,13 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         ][:25]
     filter_counts["selected universe with prices and sufficient history"] = int(len(filtered_df.columns))
     if filtered_df.empty:
-        return _scan_exit([], "universe selection", "No selected-universe symbols matched the downloaded price panel. The constituent list or ticker aliases may be the issue.")
+        return _scan_exit(
+            [],
+            "historical price coverage",
+            "FYERS live quotes were fetched, but none of the selected-group stocks has enough historical closes "
+            "for the configured momentum lookbacks. The scan needs archived daily history as well as the live quote. "
+            "Refresh the NSE archive or run the FYERS history updater, then scan again."
+        )
 
     trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
@@ -2581,11 +2587,12 @@ if st.session_state.navigation_tab == "DASHBOARD":
                         "reason",
                         "No symbols matched the strategy. Check the diagnostics and selected filters below.",
                     ))
-                    diag_cols = st.columns(4)
+                    diag_cols = st.columns(5)
                     diag_cols[0].metric("Universe symbols", f'{scan_diagnostics.get("universe_tickers", 0):,}')
-                    diag_cols[1].metric("Symbols with prices", f'{scan_diagnostics.get("universe_symbols_with_prices", 0):,}')
-                    diag_cols[2].metric("Price rows", f'{scan_diagnostics.get("price_rows", 0):,}')
-                    diag_cols[3].metric("Price columns", f'{scan_diagnostics.get("price_columns", 0):,}')
+                    diag_cols[1].metric("With price history", f'{scan_diagnostics.get("universe_symbols_with_prices", 0):,}')
+                    diag_cols[2].metric("Live FYERS quotes", f'{scan_diagnostics.get("live_quotes_applied", 0):,}')
+                    diag_cols[3].metric("Enough history", f'{scan_diagnostics.get("symbols_with_sufficient_history", 0):,}')
+                    diag_cols[4].metric("Price rows", f'{scan_diagnostics.get("price_rows", 0):,}')
                     st.caption(
                         f"Stopped at: {scan_diagnostics.get('stage', 'unknown')} | "
                         f"Price dates: {scan_diagnostics.get('first_price_date') or '—'} to "
