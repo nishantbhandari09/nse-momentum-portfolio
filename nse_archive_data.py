@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+import pyarrow.parquet as pq
 import requests
 
 ROOT = Path(__file__).resolve().parent
@@ -319,9 +320,7 @@ def load_ohlcv(ticker: str, start=None, end=None) -> pd.DataFrame:
             info.get("sha256"),
         )
         try:
-            schema_frame = pd.read_parquet(path, engine="pyarrow")
-            available = set(schema_frame.columns)
-            del schema_frame
+            available = set(pq.ParquetFile(path).schema.names)
             columns = [column for column in compact_columns if column in available]
             if "date" not in columns or "sid" not in columns:
                 continue
