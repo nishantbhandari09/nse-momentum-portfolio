@@ -197,10 +197,11 @@ st.markdown("""
         border: 1px solid #1b5d38;
         box-shadow: 0 5px 18px rgba(0, 168, 90, 0.12);
     }
-    .ht-brand-mark svg {
+    .ht-brand-mark img {
         display: block;
         width: 100%;
         height: 100%;
+        object-fit: contain;
     }
     .ht-brand-title {
         color: #f2fff5;
@@ -1952,12 +1953,12 @@ _maybe_send_rebalance_date_emails()
 # NAVIGATION HEADER
 # ==========================================
 try:
-    with open("assets/happy_trade_logo.svg", "r", encoding="utf-8") as _logo_file:
-        _happy_trade_logo_svg = _logo_file.read()
+    with open("assets/happy_trade_logo.png", "rb") as _logo_file:
+        _happy_trade_logo_png = base64.b64encode(_logo_file.read()).decode("ascii")
     st.markdown(
         f"""
         <div class="ht-brandbar">
-            <div class="ht-brand-mark">{_happy_trade_logo_svg}</div>
+            <div class="ht-brand-mark"><img src="data:image/png;base64,{_happy_trade_logo_png}" alt="The Happy Trade logo" /></div>
             <div>
                 <div class="ht-brand-eyebrow">Your trading friend</div>
                 <div class="ht-brand-title">Happy <span>Trade</span></div>
