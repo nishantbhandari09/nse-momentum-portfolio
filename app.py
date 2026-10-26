@@ -3068,20 +3068,38 @@ elif st.session_state.navigation_tab == "PRICE_CHARTS":
             index=2,
             key="tradingview_chart_interval",
         )
-        st.markdown("#### TradingView price chart")
-        components.html(
-            tv_charts.advanced_chart_html(
-                selected_symbol,
-                interval=chart_interval_labels[selected_interval],
-                height=560,
-                theme="dark",
-            ),
-            height=590,
-            scrolling=False,
-        )
+        st.markdown("#### Price chart")
+        # TradingView confirms that some symbols can be viewed on its own site but
+        # cannot be displayed in third-party widgets. The Nifty 500 chart in
+        # particular returns "This symbol is only available on TradingView".
+        # Do not render a knowingly broken embedded widget for that index.
+        if selected_symbol == "^CRSLDX":
+            st.warning(
+                "TradingView restricts the Nifty 500 symbol in embedded charts. "
+                "The ticker is valid, but TradingView does not permit it to render inside this app. "
+                "Open the official TradingView chart below."
+            )
+            st.link_button(
+                "Open Nifty 500 chart on TradingView",
+                "https://www.tradingview.com/symbols/NSE-CNX500/",
+                type="primary",
+                use_container_width=True,
+            )
+        else:
+            components.html(
+                tv_charts.advanced_chart_html(
+                    selected_symbol,
+                    interval=chart_interval_labels[selected_interval],
+                    height=560,
+                    theme="dark",
+                ),
+                height=590,
+                scrolling=False,
+            )
         st.caption(
-            "TradingView is for chart display only. Live scan quotes come from FYERS; "
-            "stored FYERS/NSE data remains the source for scanning calculations, historical metrics, and backtests."
+            "TradingView charts are for visualization only. A few symbols are not permitted in embedded widgets "
+            "and must be opened on TradingView directly. Live scan quotes come from FYERS; stored FYERS/NSE data "
+            "remains the source for scanning calculations, historical metrics, and backtests."
         )
 
         is_tradingview_only_index = selected_symbol in tv_charts.TRADINGVIEW_ONLY_INDEXES
