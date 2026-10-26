@@ -3545,6 +3545,39 @@ elif st.session_state.navigation_tab == "DATA_REPORTS":
                 f"historical periods cannot be assumed repaired. Detail: {archive_status.get('error') or 'not reported'}"
             )
 
+        st.markdown("#### Prepare Five Years of All-NSE History")
+        st.caption(
+            "Download and verify the yearly compressed archive files needed for the last five years of all-NSE "
+            "backtests. This stores the archive files locally in the running app without expanding every stock "
+            "into memory. Backtests also fetch missing years automatically for their selected date range."
+        )
+        if st.button(
+            "⬇️ Download / verify last 5 years of all-NSE history",
+            type="primary",
+            key="prefetch_all_nse_five_years",
+            use_container_width=True,
+        ):
+            prefetch_end = pd.Timestamp.now(tz="Asia/Kolkata").date()
+            prefetch_start = (pd.Timestamp(prefetch_end) - pd.DateOffset(years=5)).date()
+            try:
+                with st.spinner("Downloading and verifying the compressed NSE history files..."):
+                    prefetch_summary = nse_archive_data.prefetch_years(prefetch_start, prefetch_end)
+                st.success(
+                    f"Cached {prefetch_summary['years_cached']} yearly archive files "
+                    f"({prefetch_summary['megabytes']:.2f} MB)."
+                )
+                st.caption(
+                    f"Archive dates: {prefetch_summary.get('first_date') or '—'} to "
+                    f"{prefetch_summary.get('latest_date') or '—'}. "
+                    f"Security IDs in archive: {prefetch_summary.get('symbols', 0):,}. "
+                    "The archive is cached in yearly files, ready for backtests and scans."
+                )
+            except Exception as exc:
+                st.error(
+                    f"Could not cache the all-NSE archive ({type(exc).__name__}): {exc}. "
+                    "The scan/backtest loader can still fetch available years on demand."
+                )
+
     with eod_tab:
         st.markdown("#### Generate report for a saved strategy")
         strategy_names = list(st.session_state.get("strategies", {}).keys())
