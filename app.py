@@ -950,8 +950,92 @@ def _market_trend_is_bullish(strat, as_of_date=None):
         return False
 
 
-def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None):
+
+def _ensure_scan_index_history(ticker, min_bars=220):
+    """Refresh missing or stale supported index candles from the active FYERS session."""
+    ticker = str(ticker or "").strip()
+    if ticker not in fyers_chart_data.INDEX_FYERS_SYMBOLS:
+        return None
+
+    today = pd.Timestamp.now(tz="Asia/Kolkata").date()
+    try:
+        saved = index_history_data.load_index_ohlc(ticker)
+    except Exception:
+        saved = pd.DataFrame()
+    latest = pd.to_datetime(
+        saved.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce"
+    ).dropna()
+    stale = latest.empty or (pd.Timestamp(today) - latest.max().normalize()).days > 10
+    if not saved.empty and len(saved) >= int(min_bars) and not stale:
+        return None
+    if "fyers_access_token" not in st.session_state:
+        return (
+            f"Index history for {ticker} is missing or stale. Connect FYERS and rerun the scan "
+            "so Happy Trade can fetch its required benchmark candles."
+        )
+
+    try:
+        start_date = (pd.Timestamp(today) - pd.DateOffset(years=5)).date()
+        index_name = index_history_data.TICKER_TO_INDEX_NAME.get(ticker)
+        if index_name:
+            spec_start = pd.Timestamp(index_history_data.INDEX_HISTORY_SPECS[index_name]["start_date"]).date()
+            start_date = max(start_date, spec_start)
+        fresh = fyers_chart_data.fetch_index_history(get_fyers_client(), ticker, start_date, today)
+        if fresh.empty:
+            return (
+                f"FYERS returned no candles for {ticker}; check the FYERS historical-data entitlement "
+                "and the mapped index symbol."
+            )
+
+        fields = ["Date", "Open", "High", "Low", "Close", "Volume"]
+        old = saved.reindex(columns=fields) if not saved.empty else pd.DataFrame(columns=fields)
+        fresh = fresh.reindex(columns=fields)
+        merged = pd.concat([old, fresh], ignore_index=True)
+        merged["Date"] = pd.to_datetime(merged["Date"], errors="coerce").dt.tz_localize(None).dt.normalize()
+        merged = merged.dropna(subset=["Date", "Close"]).sort_values("Date").drop_duplicates("Date", keep="last")
+        merged["Source"] = "FYERS API"
+        spec = index_history_data.INDEX_HISTORY_SPECS[index_name]
+        path = index_history_data.INDEX_PRICE_DIR / spec["filename"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(path, index=False, date_format="%Y-%m-%d", float_format="%.6f")
+        fetch_market_data.clear()
+        return (
+            f"Refreshed {index_name} from FYERS: {len(merged):,} daily candles, "
+            f"{merged['Date'].min().date()} to {merged['Date'].max().date()}."
+        )
+    except Exception as exc:
+        return f"Could not refresh benchmark {ticker} from FYERS ({type(exc).__name__}): {exc}"
+
+
+def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, as_of_date=None, membership_calendar=None, diagnostics=None):
     selected_groups = strat.get("groups", ["Nifty 500"])
+    scan_notes = []
+    filter_counts = {}
+    group_tickers = []
+    prices_df = pd.DataFrame()
+    filtered_df = pd.DataFrame()
+    required_index_tickers = []
+
+    def _scan_exit(result, stage, reason):
+        if isinstance(diagnostics, dict):
+            diagnostics.update({
+                "stage": stage,
+                "reason": reason,
+                "groups": list(selected_groups),
+                "universe_tickers": int(len(group_tickers)),
+                "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)),
+                "price_rows": int(len(prices_df)),
+                "price_columns": int(len(prices_df.columns)),
+                "first_price_date": str(prices_df.index.min().date()) if not prices_df.empty else None,
+                "last_price_date": str(prices_df.index.max().date()) if not prices_df.empty else None,
+                "missing_benchmarks": [
+                    t for t in required_index_tickers
+                    if t not in prices_df.columns or prices_df[t].dropna().empty
+                ],
+                "filter_counts": dict(filter_counts),
+                "notes": list(scan_notes),
+            })
+        return result
 
     use_relative_momentum = bool(strat.get("use_relative_momentum_filter", False))
     relative_index_name = strat.get("relative_momentum_index", "Nifty 50")
@@ -960,19 +1044,52 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     if price_subset is None:
         group_tickers = get_trusted_tickers_by_group(selected_groups)
         fetch_tickers = list(group_tickers)
+        if strat.get("use_rs", True):
+            rs_benchmark_name = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
+            required_index_tickers.append("^NSEI" if rs_benchmark_name == "Nifty 50 / Liquid ETF" else NIFTY_REGIME_TICKER)
+        if use_relative_momentum:
+            required_index_tickers.append(relative_index_ticker)
+        if strat.get("use_market_trend_filter", False):
+            required_index_tickers.append(
+                MAJOR_MARKET_INDICES.get(strat.get("market_trend_index", "Nifty 50"), "^NSEI")
+            )
+        required_index_tickers = list(dict.fromkeys(required_index_tickers))
+        for index_ticker in required_index_tickers:
+            note = _ensure_scan_index_history(index_ticker)
+            if note:
+                scan_notes.append(note)
         if use_relative_momentum and relative_index_ticker not in fetch_tickers:
             fetch_tickers.append(relative_index_ticker)
         prices_df = fetch_market_data(fetch_tickers, period="2y")
         candidate_tickers = set(group_tickers)
     else:
-        prices_df = price_subset
+        prices_df = price_subset.copy()
         candidate_tickers = None
 
-    if prices_df.empty:
-        return []
+    if prices_df is None or prices_df.empty:
+        return _scan_exit(
+            [], "price loading",
+            "No historical price rows loaded for this strategy universe. Check the NSE archive and FYERS history.",
+        )
 
+    prices_df = prices_df.sort_index()
     latest_prices = prices_df.iloc[-1]
     filtered_df = prices_df.copy()
+    if isinstance(diagnostics, dict):
+        diagnostics.update({
+            "groups": list(selected_groups),
+            "universe_tickers": int(len(group_tickers)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "universe_symbols_with_prices": int(sum(1 for t in group_tickers if t in prices_df.columns)) if candidate_tickers is not None else int(len(prices_df.columns)),
+            "price_rows": int(len(prices_df)),
+            "price_columns": int(len(prices_df.columns)),
+            "first_price_date": str(prices_df.index.min().date()),
+            "last_price_date": str(prices_df.index.max().date()),
+            "missing_benchmarks": [
+                t for t in required_index_tickers
+                if t not in prices_df.columns or prices_df[t].dropna().empty
+            ],
+            "notes": list(scan_notes),
+        })
 
     # Backtest calls pass a historical price matrix that also contains benchmark
     # indices and always-fetched overlays. Keep ETF-only backtests inside the
@@ -995,23 +1112,27 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
             c for c in filtered_df.columns if c in selected_assets
         ]]
 
+    filter_counts["selected universe with prices"] = int(len(filtered_df.columns))
+    if filtered_df.empty:
+        return _scan_exit([], "universe selection", "No selected-universe symbols matched the downloaded price panel. The constituent list or ticker aliases may be the issue.")
+
     trend_bullish = _market_trend_is_bullish(strat, as_of_date=as_of_date)
     if strat.get("use_market_trend_filter", False) and not trend_bullish:
         # Bearish regime: do not open new positions. Existing holdings may be
         # liquidated at the backtest rebalance if the exit rule is enabled.
         if strat.get("market_trend_exit_on_bearish", True):
             current_holdings = []
-        return []
+        return _scan_exit([], "market trend filter", "The market-trend filter is bearish or its selected index does not have enough valid history. If you expect bullish signals, inspect the benchmark history or temporarily disable this optional filter.")
 
     if use_relative_momentum:
         if relative_index_ticker not in prices_df.columns:
             # Fail closed: don't silently admit stocks if benchmark history is missing.
-            return []
+            return _scan_exit([], "relative momentum benchmark", f"Relative momentum needs {relative_index_ticker}, but its price history is missing.")
         benchmark = prices_df[relative_index_ticker].dropna()
         if as_of_date is not None:
             benchmark = benchmark.loc[:pd.Timestamp(as_of_date)]
         if benchmark.empty:
-            return []
+            return _scan_exit([], "relative momentum benchmark", f"No candles are available for benchmark {relative_index_ticker}.")
 
         # Restrict the numerator to the configured main group. In point-in-time
         # stock backtests, retain the historical archive names and let the
@@ -1052,8 +1173,9 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         current_rs_average = rs_average.iloc[-1]
         passes_rs = (current_rs > current_rs_average) & current_rs.notna() & current_rs_average.notna()
         filtered_df = filtered_df.loc[:, [c for c in filtered_df.columns if c in passes_rs.index and bool(passes_rs.get(c, False))]]
+        filter_counts["relative momentum"] = int(len(filtered_df.columns))
         if filtered_df.empty:
-            return []
+            return _scan_exit([], "relative momentum filter", "No stocks passed the relative-momentum moving-average filter.")
 
     ma_config = strat.get("moving_average", "200 EMA")
     if ma_config != "None":
@@ -1064,16 +1186,19 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         else:
             ma_vals = prices_df.rolling(window=period).mean().iloc[-1]
         filtered_df = filtered_df.loc[:, latest_prices > ma_vals]
+    filter_counts["moving average"] = int(len(filtered_df.columns))
 
     pct_high = strat.get("pct_from_high", 15.0)
     if pct_high > 0 and len(filtered_df) >= 252:
         period_high = filtered_df.iloc[-252:].max()
         pct_diff = ((period_high - latest_prices) / period_high) * 100
         filtered_df = filtered_df.loc[:, pct_diff <= pct_high]
+    filter_counts["distance from 52-week high"] = int(len(filtered_df.columns))
 
     min_price = strat.get("min_price", 0.0)
     if min_price > 0:
         filtered_df = filtered_df.loc[:, latest_prices >= min_price]
+    filter_counts["minimum price"] = int(len(filtered_df.columns))
 
     if as_of_date is not None and membership_calendar is not None and not membership_calendar.empty:
         selected_etf_tickers = get_selected_etf_tickers(selected_groups)
@@ -1096,6 +1221,7 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
             )
         ]
         filtered_df = filtered_df[eligible_cols]
+    filter_counts["index membership / eligibility"] = int(len(filtered_df.columns))
 
     if strat.get("use_rs", True):
         rs_benchmark = str(strat.get("rs_benchmark", "Nifty 500 / G-Sec"))
@@ -1108,7 +1234,8 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
 
         # A missing/stale benchmark must not silently disable the regime rule.
         if rs_index_ticker not in prices_df.columns or rs_defensive_ticker not in prices_df.columns:
-            return []
+            missing = [t for t in (rs_index_ticker, rs_defensive_ticker) if t not in prices_df.columns or prices_df[t].dropna().empty]
+            return _scan_exit([], "relative strength benchmark", "Required RS benchmark candles are missing: " + ", ".join(missing) + ". Reconnect FYERS and rerun the scan.")
         rs_index = prices_df[rs_index_ticker].dropna()
         rs_defensive = prices_df[rs_defensive_ticker].dropna()
         if as_of_date is not None:
@@ -1118,9 +1245,10 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
         rs_ratio = rs_index.div(rs_defensive.replace(0, np.nan)).dropna()
         rs_sma = rs_ratio.rolling(window=50, min_periods=50).mean()
         if rs_ratio.empty or pd.isna(rs_sma.iloc[-1]):
-            return []
+            return _scan_exit([], "relative strength history", f"The {rs_index_ticker} / {rs_defensive_ticker} ratio has fewer than 50 overlapping valid sessions.")
         if rs_ratio.iloc[-1] < rs_sma.iloc[-1]:
-            return [rs_defensive_ticker]
+            scan_notes.append(f"Relative-strength regime is below its 50-session average; {rs_defensive_ticker} is the configured defensive fallback.")
+            return _scan_exit([rs_defensive_ticker], "defensive regime", f"The strategy selected {rs_defensive_ticker} because the market-relative-strength ratio is below its 50-session average.")
 
     periods = [int(p) for p in strat.get("period_days", [252, 120, 60]) if int(p) > 0]
     raw_weights = strat.get("period_weights", [0.5, 0.3, 0.2])
@@ -1160,12 +1288,12 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     # included in the composite score; missing periods cannot give it an
     # artificially low (better) weighted rank.
     if not rank_components:
-        return []
+        return _scan_exit([], "momentum ranking", "Not enough usable price history for any configured momentum lookback. Check the stock-history date range or use shorter lookbacks.")
 
     rank_frame = pd.concat(rank_components, axis=1)
     complete_rank_frame = rank_frame.dropna(axis=0, how="any")
     if complete_rank_frame.empty:
-        return []
+        return _scan_exit([], "momentum ranking", "No stocks have valid returns across all configured momentum lookbacks. Some symbols have missing or short histories.")
     active_weights = np.asarray(component_weights, dtype=float)
     active_weights = active_weights / active_weights.sum()
     composite_rank = (
@@ -1182,7 +1310,17 @@ def run_strategy_stock_scanner(strat, price_subset=None, current_holdings=None, 
     slots_needed = max(entry_n - len(retained), 0)
     new_entries = [s for s in ordinal_rank.index if s not in retained][:slots_needed]
 
-    return retained + new_entries
+    result = retained + new_entries
+    if isinstance(diagnostics, dict):
+        diagnostics.update({
+            "stage": "complete",
+            "reason": f"Ranked {len(composite_rank):,} eligible symbols and selected {len(result):,} target(s).",
+            "rankable_symbols": int(len(composite_rank)),
+            "selected_targets": int(len(result)),
+            "filter_counts": dict(filter_counts),
+            "notes": list(scan_notes),
+        })
+    return result
 
 
 def run_backtest_simulation(strat_config, initial_capital, start_date, end_date, use_point_in_time=True, trading_cost_config=None):
@@ -2255,10 +2393,25 @@ if st.session_state.navigation_tab == "DASHBOARD":
             run_scan = st.button("🚀 Run Live Stock Scan for this Strategy", type="primary", use_container_width=True)
 
         if run_scan:
+            scan_diagnostics = {}
             with st.spinner("Executing strategy parameters against selected asset groups..."):
                 current_symbols = [p["Symbol"] for p in strat.get("positions", [])]
-                scanned_tickers = run_strategy_stock_scanner(strat, current_holdings=current_symbols, as_of_date=pd.Timestamp.today())
+                try:
+                    scanned_tickers = run_strategy_stock_scanner(
+                        strat,
+                        current_holdings=current_symbols,
+                        as_of_date=pd.Timestamp.today(),
+                        diagnostics=scan_diagnostics,
+                    )
+                except Exception as exc:
+                    scanned_tickers = []
+                    scan_diagnostics.update({
+                        "stage": "scan error",
+                        "reason": f"{type(exc).__name__}: {exc}",
+                        "groups": list(strat.get("groups", ["Nifty 500"])),
+                    })
                 st.session_state[f"scanned_results_{strat_name}"] = scanned_tickers
+                st.session_state[f"scan_diagnostics_{strat_name}"] = scan_diagnostics
                 st.session_state[f"strategy_email_notice_{strat_name}"] = _send_strategy_update_email(
                     strategy_name=strat_name,
                     strategy=strat,
@@ -2282,6 +2435,35 @@ if st.session_state.navigation_tab == "DASHBOARD":
 
         if scanned_results is not None:
             st.success(f"Scan Complete! Found **{len(scanned_results)}** target portfolio stocks across selected groups based on strategy rules.")
+            if not scanned_results:
+                scan_diagnostics = st.session_state.get(f"scan_diagnostics_{strat_name}", {})
+                with st.expander("Why did the scan return no stocks?", expanded=True):
+                    st.warning(scan_diagnostics.get(
+                        "reason",
+                        "No symbols matched the strategy. Check the diagnostics and selected filters below.",
+                    ))
+                    diag_cols = st.columns(4)
+                    diag_cols[0].metric("Universe symbols", f'{scan_diagnostics.get("universe_tickers", 0):,}')
+                    diag_cols[1].metric("Symbols with prices", f'{scan_diagnostics.get("universe_symbols_with_prices", 0):,}')
+                    diag_cols[2].metric("Price rows", f'{scan_diagnostics.get("price_rows", 0):,}')
+                    diag_cols[3].metric("Price columns", f'{scan_diagnostics.get("price_columns", 0):,}')
+                    st.caption(
+                        f"Stopped at: {scan_diagnostics.get('stage', 'unknown')} | "
+                        f"Price dates: {scan_diagnostics.get('first_price_date') or '—'} to "
+                        f"{scan_diagnostics.get('last_price_date') or '—'}"
+                    )
+                    counts = scan_diagnostics.get("filter_counts", {})
+                    if counts:
+                        st.dataframe(
+                            pd.DataFrame([{"Filter stage": name, "Symbols remaining": count} for name, count in counts.items()]),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    for note in scan_diagnostics.get("notes", []):
+                        st.info(note)
+                    missing = scan_diagnostics.get("missing_benchmarks", [])
+                    if missing:
+                        st.error("Missing benchmark history: " + ", ".join(missing))
 
             sc_col1, sc_col2 = st.columns(2)
             with sc_col1:
