@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build compact, adjusted yearly NSE price panels for release download by Streamlit.
+"""Build compact, adjusted yearly NSE OHLCV panels for release download by Streamlit.
 
 Input: nse_data/yearly/nse_prices_adj_YYYY.parquet (built by download_nse_history.py).
-Output: nse_data/derived/prices_adj_YYYY.parquet, symbols.parquet, manifest.json.
+Output: nse_data/derived/prices_adj_YYYY.parquet with adjusted OHLC, adjusted close,
+raw volume, turnover and trade counts, plus symbols.parquet and manifest.json.
+The archive is stored as Release assets and downloaded by the app on demand.
 """
 from __future__ import annotations
 
